@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Smoke test: boot magnus-bridge in batch Emacs against the magnus stub,
+# then exercise the API surface with curl.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+DIR="$(mktemp -d)"
+MB=http://127.0.0.1:8399
+
+if lsof -nP -iTCP:8399 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "FAIL: port 8399 already in use (stale test server?)"; exit 1
+fi
+# $EMACS may be a wrapper script; kill its children too or the real
+# emacs survives and squats on the port for the next run.
+trap 'pkill -P "$SERVER_PID" 2>/dev/null || true; kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$DIR"' EXIT
+
+MB_TEST_DIR="$DIR" "${EMACS:-emacs}" -Q --batch -L . -L test \
+  -l magnus-stub -l magnus-bridge -l test/run-server.el \
+  >"$DIR/server.log" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 40); do
+  grep -q "test server ready" "$DIR/server.log" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q "test server ready" "$DIR/server.log" || {
+  echo "FAIL: server did not start"; cat "$DIR/server.log"; exit 1; }
+
+pass=0; fail=0
+check() { # check <desc> <expected> <actual>
+  if [ "$2" = "$3" ]; then
+    pass=$((pass + 1)); echo "ok   - $1"
+  else
+    fail=$((fail + 1)); echo "FAIL - $1 (expected $2, got $3)"
+  fi
+}
+
+code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+CODE=$(cat "$DIR/pair-code")
+# Bodies are precomputed: macOS bash 3.2 mis-parses \" escapes inside
+# a double-quoted $(...) and brace-expands the JSON into fragments.
+PAIR_BODY="{\"code\":\"$CODE\",\"device\":\"smoke\"}"
+REPLAY_BODY="{\"code\":\"$CODE\",\"device\":\"replay\"}"
+J=(-H "Content-Type: application/json")
+
+check "app shell served"        200 "$(code $MB/)"
+check "api rejects unpaired"    401 "$(code $MB/api/status)"
+check "bad pairing code"        403 "$(code "${J[@]}" -d '{"code":"000000"}' $MB/api/pair)"
+check "path traversal blocked"  404 "$(code --path-as-is $MB/../magnus-bridge.el)"
+check "pairing succeeds"        200 "$(code -c "$DIR/cookies" "${J[@]}" \
+  -d "$PAIR_BODY" $MB/api/pair)"
+check "code is single-use"      403 "$(code "${J[@]}" \
+  -d "$REPLAY_BODY" $MB/api/pair)"
+check "status with token"       200 "$(code -b "$DIR/cookies" $MB/api/status)"
+check "send delivers"           200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","text":"smoke hello"}' $MB/api/send)"
+check "empty send rejected"     400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","text":"  "}' $MB/api/send)"
+check "approve needs flag"      400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","key":"1"}' $MB/api/approve)"
+check "approve key whitelist"   400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","key":"q"}' $MB/api/approve)"
+
+history=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+case "$history" in
+  *'"text":"smoke hello"'*) pass=$((pass + 1)); echo "ok   - history has sent event" ;;
+  *) fail=$((fail + 1)); echo "FAIL - history missing sent event: $history" ;;
+esac
+
+sse=$(curl -s -N -b "$DIR/cookies" --max-time 2 "$MB/api/events?since=0" || true)
+case "$sse" in
+  *'"type":"sent"'*) pass=$((pass + 1)); echo "ok   - SSE replays backlog" ;;
+  *) fail=$((fail + 1)); echo "FAIL - SSE backlog missing: $sse" ;;
+esac
+
+echo "----"
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]
