@@ -89,6 +89,24 @@ case "$history" in
   *) pass=$((pass + 1)); echo "ok   - thinking blocks not relayed" ;;
 esac
 
+# Typing indicator: session-file growth with NO visible text must yield
+# a transient typing event on the live SSE stream (and never in history).
+curl -s -N -b "$DIR/cookies" --max-time 4 "$MB/api/events?since=999" >"$DIR/sse-live" &
+SSE_PID=$!
+sleep 0.5
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}' >> "$DIR/sess-test.jsonl"
+wait "$SSE_PID" || true
+if grep -q '"type":"typing"' "$DIR/sse-live"; then
+  pass=$((pass + 1)); echo "ok   - typing event on live stream"
+else
+  fail=$((fail + 1)); echo "FAIL - no typing event: $(cat "$DIR/sse-live")"
+fi
+history=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+case "$history" in
+  *'"type":"typing"'*) fail=$((fail + 1)); echo "FAIL - typing event leaked into history" ;;
+  *) pass=$((pass + 1)); echo "ok   - typing events not stored" ;;
+esac
+
 # Upload: 4KB of fake JPEG bytes, base64'd. Server must save the file
 # and nudge the agent with its path.
 FAKE_IMG=$(head -c 4096 /dev/urandom | base64 | tr -d '\n')

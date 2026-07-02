@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 
@@ -143,7 +143,7 @@ sift or the JSONL on a real screen for those."
   "File persisting auto-approve patterns learned from the phone."
   :type 'file)
 
-(defconst magnus-bridge-version "0.3.0")
+(defconst magnus-bridge-version "0.4.0")
 
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
@@ -313,6 +313,24 @@ second factor."
       (setq magnus-bridge--sse-clients (delq client magnus-bridge--sse-clients))
       (ignore-errors (delete-process client)))))
 
+(defun magnus-bridge--broadcast-transient (type &rest fields)
+  "Broadcast an ephemeral event of TYPE with plist FIELDS.
+Transient events are pushed to live clients but never stored, and the
+SSE frame carries no id so reconnect cursors are unaffected."
+  (let* ((event `((type . ,type)
+                  ,@(cl-loop for (k v) on fields by #'cddr
+                             collect (cons (intern (substring (symbol-name k) 1))
+                                           (or v "")))))
+         (frame (format "data: %s\n\n" (json-serialize event)))
+         (dead nil))
+    (dolist (client magnus-bridge--sse-clients)
+      (condition-case nil
+          (process-send-string client frame)
+        (error (push client dead))))
+    (dolist (client dead)
+      (setq magnus-bridge--sse-clients
+            (delq client magnus-bridge--sse-clients)))))
+
 (defun magnus-bridge--events-since (since)
   "Return events with id greater than SINCE, oldest first."
   (nreverse (cl-remove-if-not
@@ -434,11 +452,21 @@ Returns the instance name, or signals an error."
            (watch (cdr entry))
            (instance (magnus-instances-get id)))
       (when instance
-        (dolist (text (magnus-bridge--read-new-texts watch))
-          (magnus-bridge--emit "reply"
-                               :agent id
-                               :name (magnus-instance-name instance)
-                               :text text))))))
+        (let* ((before (plist-get watch :offset))
+               (texts (magnus-bridge--read-new-texts watch))
+               (advanced (> (plist-get watch :offset) before)))
+          (dolist (text texts)
+            (magnus-bridge--emit "reply"
+                                 :agent id
+                                 :name (magnus-instance-name instance)
+                                 :text text))
+          ;; Session file grew but produced no visible text: the agent
+          ;; is thinking or running tools — i.e. typing.
+          (when (and advanced (null texts))
+            (magnus-bridge--broadcast-transient
+             "typing"
+             :agent id
+             :name (magnus-instance-name instance))))))))
 
 (defun magnus-bridge--read-new-texts (watch)
   "Read new complete JSONL lines for WATCH; return the agent's text blocks.

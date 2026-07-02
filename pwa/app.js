@@ -16,7 +16,17 @@ const state = {
   lastEventId: 0,
   lastSeen: JSON.parse(localStorage.getItem('lastSeen') || '{}'),
   source: null,          // EventSource
+  typing: new Map(),     // agent id -> expiry ms; fed by transient events
 };
+
+setInterval(() => {                 // expire stale typing bubbles
+  const now = Date.now();
+  let changed = false;
+  for (const [id, until] of state.typing) {
+    if (until < now) { state.typing.delete(id); changed = true; }
+  }
+  if (changed) renderFeed();
+}, 2000);
 
 /* ---------- bootstrap ---------- */
 
@@ -93,6 +103,11 @@ function connectEvents() {
   source.onerror = () => setConnected(false); // EventSource auto-reconnects
   source.onmessage = (msg) => {
     const event = JSON.parse(msg.data);
+    if (event.type === 'typing') {          // transient: never stored
+      state.typing.set(event.agent, Date.now() + 6000);
+      renderFeed();
+      return;
+    }
     ingest(event);
     renderFeed();
     renderTabs();
@@ -108,6 +123,9 @@ function ingest(event) {
     state.attentions.set(event.agent, event);
   } else if (event.type === 'attention-clear' || event.type === 'approved') {
     state.attentions.delete(event.agent);
+  }
+  if (event.type === 'reply' || event.type === 'mention') {
+    state.typing.delete(event.agent);   // the reply arrived; stop the dots
   }
 }
 
@@ -193,6 +211,12 @@ function renderFeed() {
     }
     feed.appendChild(renderEvent(event));
   }
+  const now = Date.now();
+  for (const [id, until] of state.typing) {
+    if (until < now) continue;
+    if (state.selected !== 'all' && state.selected !== id) continue;
+    feed.appendChild(typingBubble(agentName(id) || 'agent'));
+  }
   if (stick) feed.scrollTop = feed.scrollHeight;
   if (state.selected !== 'all') markSeen(state.selected);
   $('msg-input').placeholder = state.selected === 'all'
@@ -242,6 +266,20 @@ function renderEvent(event) {
     el.textContent = (event.name || '') + ' · ' + event.type +
       (event.text ? ' · ' + event.text : '');
   }
+  return el;
+}
+
+function typingBubble(name) {
+  const el = document.createElement('div');
+  el.className = 'msg typing';
+  const label = document.createElement('span');
+  label.className = 'who';
+  label.textContent = name + ' is working';
+  el.appendChild(label);
+  const dots = document.createElement('span');
+  dots.className = 'dots';
+  for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('i'));
+  el.appendChild(dots);
   return el;
 }
 
