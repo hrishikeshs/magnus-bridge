@@ -5,13 +5,18 @@
 
 const $ = (id) => document.getElementById(id);
 
+const QUICK_REPLIES = ['status?', 'carry on', 'ship it', 'check coord'];
+const HEALTH_GLYPHS = { ok: '●', stale: '◐', stuck: '·', dead: '✕' };
+const HEALTH_LABELS = { stuck: 'idle', stale: 'quiet' };
+
 const state = {
-  agents: [],          // roster from /api/status
-  events: [],          // chronological event list
+  agents: [],            // roster from /api/status
+  events: [],            // chronological event list
   attentions: new Map(), // agent id -> latest unresolved attention event
   selected: 'all',
   lastEventId: 0,
-  source: null,        // EventSource
+  lastSeen: JSON.parse(localStorage.getItem('lastSeen') || '{}'),
+  source: null,          // EventSource
 };
 
 /* ---------- bootstrap ---------- */
@@ -111,37 +116,62 @@ function setConnected(on) {
   $('conn-dot').classList.toggle('on', !!on);
 }
 
-/* ---------- rendering ---------- */
+function markSeen(agentId) {
+  state.lastSeen[agentId] = state.lastEventId;
+  localStorage.setItem('lastSeen', JSON.stringify(state.lastSeen));
+}
+
+function hasUnread(agentId) {
+  const seen = state.lastSeen[agentId] || 0;
+  return state.events.some((e) =>
+    e.agent === agentId && e.id > seen && e.type !== 'sent');
+}
+
+/* ---------- tabs ---------- */
 
 function renderTabs() {
   const tabs = $('agent-tabs');
   tabs.innerHTML = '';
-  tabs.appendChild(makeTab('all', 'All', null, null));
+  tabs.appendChild(makeTab('all', 'All', null));
   for (const agent of state.agents) {
-    tabs.appendChild(makeTab(agent.id, agent.name, agent.health,
-                             state.attentions.has(agent.id)));
+    tabs.appendChild(makeTab(agent.id, agent.name, agent.health));
   }
 }
 
-function makeTab(id, label, health, needsAttention) {
+function makeTab(id, label, health) {
   const el = document.createElement('button');
   el.className = 'tab' + (state.selected === id ? ' active' : '');
   el.textContent = label;
   if (health) {
     const dot = document.createElement('span');
     dot.className = 'h ' + health;
-    dot.textContent = { ok: '●', stale: '◐', stuck: '○', dead: '✕' }[health] || '·';
+    dot.textContent = HEALTH_GLYPHS[health] || '·';
+    dot.title = HEALTH_LABELS[health] || health;
     el.prepend(dot);
   }
-  if (needsAttention) {
-    const bang = document.createElement('span');
-    bang.className = 'bang';
-    bang.textContent = '!';
-    el.appendChild(bang);
+  if (state.attentions.has(id)) {
+    el.appendChild(chip('bang', '!'));
+  } else if (id !== 'all' && hasUnread(id)) {
+    el.appendChild(chip('unread', ''));
   }
-  el.onclick = () => { state.selected = id; renderTabs(); renderFeed(); };
+  el.onclick = () => {
+    state.selected = id;
+    if (id !== 'all') markSeen(id);
+    renderTabs();
+    renderFeed();
+    restoreDraft();
+  };
   return el;
 }
+
+function chip(cls, text) {
+  const el = document.createElement('span');
+  el.className = cls;
+  el.textContent = text;
+  return el;
+}
+
+/* ---------- feed ---------- */
 
 function visibleEvents() {
   if (state.selected === 'all') return state.events;
@@ -152,14 +182,25 @@ function renderFeed() {
   const feed = $('feed');
   const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   feed.innerHTML = '';
+  let lastDay = '';
   for (const event of visibleEvents()) {
+    const day = (event.ts || '').slice(0, 10);
+    if (day && day !== lastDay) {
+      lastDay = day;
+      const sep = document.createElement('div');
+      sep.className = 'day-sep';
+      sep.textContent = day;
+      feed.appendChild(sep);
+    }
     feed.appendChild(renderEvent(event));
   }
   if (stick) feed.scrollTop = feed.scrollHeight;
+  if (state.selected !== 'all') markSeen(state.selected);
   $('msg-input').placeholder = state.selected === 'all'
     ? 'Pick an agent to message…'
     : 'Message ' + (agentName(state.selected) || 'agent') + '…';
   $('send-btn').disabled = state.selected === 'all';
+  $('chips').classList.toggle('hidden', state.selected === 'all');
 }
 
 function agentName(id) {
@@ -171,28 +212,31 @@ function renderEvent(event) {
   const el = document.createElement('div');
   if (event.type === 'sent') {
     el.className = 'msg sent';
-    el.appendChild(who('you → ' + (event.name || '?')));
-    el.appendChild(text(event.text));
+    el.appendChild(who('you → ' + (event.name || '?'), event.ts));
+    el.appendChild(richText(event.text));
+  } else if (event.type === 'reply') {
+    el.className = 'msg reply';
+    el.appendChild(who(event.name || '?', event.ts));
+    el.appendChild(richText(event.text));
   } else if (event.type === 'mention') {
     el.className = 'msg mention';
-    el.appendChild(who(event.name || 'crew'));
-    el.appendChild(text(event.text));
+    el.appendChild(who((event.name || 'crew') + ' · @mention', event.ts));
+    el.appendChild(richText(event.text));
   } else if (event.type === 'attention') {
-    const active = state.attentions.get(event.agent) === event;
-    el.className = 'attention' + (active ? '' : ' resolved');
-    el.appendChild(who((event.name || '?') + ' needs your attention'));
-    const pre = document.createElement('pre');
-    pre.textContent = event.text || '(no prompt text captured)';
-    el.appendChild(pre);
-    const keys = document.createElement('div');
-    keys.className = 'keys';
-    for (const key of ['1', '2', '3', 'esc']) {
-      const btn = document.createElement('button');
-      btn.textContent = key === 'esc' ? '⎋' : key;
-      btn.onclick = () => approve(event.agent, key);
-      keys.appendChild(btn);
-    }
-    el.appendChild(keys);
+    el.className = 'attention' +
+      (state.attentions.get(event.agent) === event ? '' : ' resolved');
+    el.appendChild(who((event.name || '?') + ' needs your attention', event.ts));
+    el.appendChild(promptExcerpt(event.text));
+    el.appendChild(approveKeys(event));
+  } else if (event.type === 'auto-approved') {
+    el.className = 'msg system';
+    el.textContent = '⚡ auto-approved for ' + (event.name || '?');
+  } else if (event.type === 'pattern-learned') {
+    el.className = 'msg system';
+    el.textContent = '✓ always allow: ' + event.text;
+  } else if (event.type === 'pattern-removed') {
+    el.className = 'msg system';
+    el.textContent = '✕ revoked: ' + event.text;
   } else {
     el.className = 'msg system';
     el.textContent = (event.name || '') + ' · ' + event.type +
@@ -201,50 +245,271 @@ function renderEvent(event) {
   return el;
 }
 
-function who(label) {
+function who(label, ts) {
   const el = document.createElement('span');
   el.className = 'who';
-  el.textContent = label;
+  el.textContent = label + (ts ? '  ' + localTime(ts) : '');
   return el;
 }
 
-function text(content) {
+function localTime(ts) {
+  const d = new Date(ts);
+  return isNaN(d) ? '' :
+    d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/* Render text with [thinking] blocks collapsed into tappable pills and
+   very long remainders clamped behind "show more". */
+function richText(text) {
+  const container = document.createElement('div');
+  container.className = 'rich';
+  const re = /\[thinking\]([\s\S]*?)(?:\[end-thinking\]|\[\/thinking\]|(?=\[response\])|$)/g;
+  let cursor = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    appendPlain(container, text.slice(cursor, match.index));
+    appendThinking(container, match[1].trim());
+    cursor = re.lastIndex;
+  }
+  appendPlain(container, text.slice(cursor).replace(/\[response\]/g, '').trim());
+  return container;
+}
+
+function appendPlain(container, chunk) {
+  chunk = chunk.trim();
+  if (!chunk) return;
   const el = document.createElement('span');
-  el.textContent = content;
-  return el;
+  el.className = 'plain';
+  if (chunk.length > 1200) {
+    el.textContent = chunk.slice(0, 1000) + '…';
+    const more = document.createElement('button');
+    more.className = 'show-more';
+    more.textContent = 'show more';
+    more.onclick = () => { el.textContent = chunk; more.remove(); };
+    container.appendChild(el);
+    container.appendChild(more);
+  } else {
+    el.textContent = chunk;
+    container.appendChild(el);
+  }
 }
 
-/* ---------- actions ---------- */
+function appendThinking(container, thought) {
+  if (!thought) return;
+  const words = thought.split(/\s+/).length;
+  const pill = document.createElement('button');
+  pill.className = 'think-pill';
+  pill.textContent = '💭 thinking · ' + words + ' words';
+  const body = document.createElement('div');
+  body.className = 'think-body hidden';
+  body.textContent = thought;
+  pill.onclick = () => {
+    const open = body.classList.toggle('hidden');
+    pill.textContent = open ? '💭 thinking · ' + words + ' words' : '💭 hide thinking';
+  };
+  container.appendChild(pill);
+  container.appendChild(body);
+}
+
+/* ---------- attention cards ---------- */
+
+function promptExcerpt(text) {
+  const pre = document.createElement('pre');
+  const lines = (text || '').split('\n');
+  if (lines.length > 4) {
+    pre.textContent = lines.slice(-4).join('\n');
+    const more = document.createElement('button');
+    more.className = 'show-more';
+    more.textContent = 'show full prompt';
+    more.onclick = () => { pre.textContent = text; more.remove(); };
+    const wrap = document.createElement('div');
+    wrap.appendChild(more);
+    wrap.appendChild(pre);
+    return wrap;
+  }
+  pre.textContent = text || '(no prompt text captured)';
+  return pre;
+}
+
+/* Parse numbered options like "❯ 1. Yes" out of the prompt so buttons
+   carry labels instead of bare digits. */
+function promptOptions(text) {
+  const options = [];
+  for (const line of (text || '').split('\n')) {
+    const m = line.match(/^\s*(?:❯\s*)?([123])\.\s*(.+?)\s*$/);
+    if (m) options.push({ key: m[1], label: m[2].slice(0, 28) });
+  }
+  return options.length ? options : [
+    { key: '1', label: 'Yes' }, { key: '3', label: 'No' }];
+}
+
+function approveKeys(event) {
+  const keys = document.createElement('div');
+  keys.className = 'keys';
+  for (const opt of promptOptions(event.text)) {
+    const btn = document.createElement('button');
+    btn.textContent = opt.label;
+    btn.onclick = () => approve(event.agent, opt.key);
+    keys.appendChild(btn);
+  }
+  const esc = document.createElement('button');
+  esc.textContent = '⎋';
+  esc.className = 'esc';
+  esc.onclick = () => approve(event.agent, 'esc');
+  keys.appendChild(esc);
+
+  const always = document.createElement('button');
+  always.textContent = '✓ Always allow this';
+  always.className = 'always';
+  always.onclick = () => openAlwaysAllow(event);
+  const wrap = document.createElement('div');
+  wrap.appendChild(keys);
+  wrap.appendChild(always);
+  return wrap;
+}
+
+/* "Always allow" — taught at the moment of decision. The extracted
+   pattern is shown editable before anything is learned. */
+function extractPattern(text) {
+  for (const line of (text || '').split('\n')) {
+    const m = line.trim().match(/^[A-Z][A-Za-z]*\(.+\)$/);
+    if (m) return m[0];
+  }
+  const first = (text || '').split('\n').map((l) => l.trim()).find(Boolean);
+  return first || '';
+}
+
+function openAlwaysAllow(event) {
+  $('allow-pattern').value = extractPattern(event.text);
+  $('allow-modal').classList.remove('hidden');
+  $('allow-confirm').onclick = async () => {
+    const pattern = $('allow-pattern').value.trim();
+    if (!pattern) return;
+    const res = await api('/api/patterns', { action: 'add', pattern });
+    if (res && res.ok) {
+      $('allow-modal').classList.add('hidden');
+      approve(event.agent, '1');
+    } else {
+      $('allow-hint').textContent =
+        'Rejected — patterns need at least 6 characters.';
+    }
+  };
+}
+
+$('allow-cancel').addEventListener('click',
+  () => $('allow-modal').classList.add('hidden'));
+
+/* ---------- patterns sheet ---------- */
+
+$('settings-btn').addEventListener('click', async () => {
+  const res = await fetch('/api/patterns').catch(() => null);
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  const list = $('patterns-list');
+  list.innerHTML = '';
+  for (const pattern of data.learned || []) {
+    const row = document.createElement('div');
+    row.className = 'pattern-row';
+    const label = document.createElement('code');
+    label.textContent = pattern;
+    const del = document.createElement('button');
+    del.textContent = 'revoke';
+    del.onclick = async () => {
+      await api('/api/patterns', { action: 'remove', pattern });
+      row.remove();
+    };
+    row.appendChild(label);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+  if (!(data.learned || []).length) {
+    list.textContent = 'No patterns taught from the phone yet. ' +
+      'Use “Always allow this” on an attention card.';
+  }
+  $('patterns-note').textContent = (data.builtin || []).length +
+    ' more configured in Emacs (managed there).';
+  $('patterns-modal').classList.remove('hidden');
+});
+
+$('patterns-close').addEventListener('click',
+  () => $('patterns-modal').classList.add('hidden'));
+
+/* ---------- composer ---------- */
+
+const input = $('msg-input');
+
+function autogrow() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+
+function draftKey() { return 'draft-' + state.selected; }
+
+function restoreDraft() {
+  input.value = localStorage.getItem(draftKey()) || '';
+  autogrow();
+}
+
+input.addEventListener('input', () => {
+  localStorage.setItem(draftKey(), input.value);
+  autogrow();
+});
+
+const coarsePointer = matchMedia('(pointer: coarse)').matches;
+input.addEventListener('keydown', (e) => {
+  // Desktop: Enter sends, Shift+Enter breaks. Touch: Enter always breaks
+  // (fat-thumb protection) — the send button is the only trigger.
+  if (e.key === 'Enter' && !e.shiftKey && !coarsePointer) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+const chipsRow = $('chips');
+for (const text of QUICK_REPLIES) {
+  const b = document.createElement('button');
+  b.className = 'chip';
+  b.textContent = text;
+  b.onclick = () => {
+    input.value = input.value ? input.value + ' ' + text : text;
+    localStorage.setItem(draftKey(), input.value);
+    autogrow();
+    input.focus();
+  };
+  chipsRow.appendChild(b);
+}
 
 async function sendMessage() {
-  const input = $('msg-input');
   const body = input.value.trim();
   if (!body || state.selected === 'all') return;
   input.value = '';
+  localStorage.removeItem(draftKey());
+  autogrow();
   requestNotifyPermission();
-  const res = await fetch('/api/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent: state.selected, text: body }),
-  }).catch(() => null);
+  const res = await api('/api/send', { agent: state.selected, text: body });
   if (!res || !res.ok) {
     input.value = body;   // give the message back rather than losing it
+    localStorage.setItem(draftKey(), body);
+    autogrow();
     setConnected(false);
   }
 }
 
-async function approve(agent, key) {
-  await fetch('/api/approve', {
+$('send-btn').addEventListener('click', sendMessage);
+
+/* ---------- actions ---------- */
+
+async function api(path, payload) {
+  return fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent, key }),
+    body: JSON.stringify(payload),
   }).catch(() => null);
 }
 
-$('send-btn').addEventListener('click', sendMessage);
-$('msg-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendMessage();
-});
+async function approve(agent, key) {
+  await api('/api/approve', { agent, key });
+}
 
 /* ---------- notifications (best-effort; no-op where unsupported) ---------- */
 
@@ -261,8 +526,10 @@ function maybeNotify(event) {
     new Notification(event.name + ' needs your attention', {
       body: (event.text || '').slice(-120),
     });
-  } else if (event.type === 'mention') {
-    new Notification(event.name || 'crew', { body: event.text });
+  } else if (event.type === 'mention' || event.type === 'reply') {
+    new Notification(event.name || 'crew', {
+      body: (event.text || '').slice(0, 160),
+    });
   }
 }
 

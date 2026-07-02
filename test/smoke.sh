@@ -74,6 +74,35 @@ case "$sse" in
   *) fail=$((fail + 1)); echo "FAIL - SSE backlog missing: $sse" ;;
 esac
 
+# Reply streaming: the send above armed a watch on the stub session file.
+# Append an assistant line with thinking + text; only the text may relay.
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"secret reasoning"}]}}' >> "$DIR/sess-test.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"On it, boss."}]}}' >> "$DIR/sess-test.jsonl"
+sleep 2.5
+history=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+case "$history" in
+  *'"type":"reply"'*'On it, boss.'*) pass=$((pass + 1)); echo "ok   - reply streamed from session file" ;;
+  *) fail=$((fail + 1)); echo "FAIL - reply not streamed: $history" ;;
+esac
+case "$history" in
+  *'secret reasoning'*) fail=$((fail + 1)); echo "FAIL - thinking block leaked to phone" ;;
+  *) pass=$((pass + 1)); echo "ok   - thinking blocks not relayed" ;;
+esac
+
+check "pattern too short rejected" 400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"action":"add","pattern":"rm"}' $MB/api/patterns)"
+check "pattern learned"            200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"action":"add","pattern":"Bash(git status)"}' $MB/api/patterns)"
+patterns=$(curl -s -b "$DIR/cookies" "$MB/api/patterns")
+case "$patterns" in
+  *'Bash(git status)'*) pass=$((pass + 1)); echo "ok   - pattern listed" ;;
+  *) fail=$((fail + 1)); echo "FAIL - pattern missing from list: $patterns" ;;
+esac
+check "pattern removed"            200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"action":"remove","pattern":"Bash(git status)"}' $MB/api/patterns)"
+check "unknown pattern remove"     400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"action":"remove","pattern":"never-existed-xyz"}' $MB/api/patterns)"
+
 echo "----"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

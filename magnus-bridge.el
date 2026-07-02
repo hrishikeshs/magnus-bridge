@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 
@@ -57,11 +57,14 @@
 (declare-function magnus-health-get "magnus-health" (instance))
 (declare-function magnus-coord-nudge-agent "magnus-coord" (instance message &optional source))
 (declare-function magnus-attention--tail-text "magnus-attention")
+(declare-function magnus-instance-session-id "magnus-instances" (instance))
+(declare-function magnus-process--session-jsonl-path "magnus-process" (directory session-id))
 (declare-function vterm-send-string "vterm" (string &optional paste-p))
 (declare-function vterm-send-return "vterm")
 (declare-function vterm-send-escape "vterm")
 
 (defvar magnus-attention-queue)
+(defvar magnus-attention-auto-approve-patterns)
 (defvar magnus-coord-file)
 
 ;;; Customization
@@ -120,7 +123,24 @@ Log, which the bridge relays back to your phone."
   "Seconds between scans of coordination files for user mentions."
   :type 'integer)
 
-(defconst magnus-bridge-version "0.1.0")
+(defcustom magnus-bridge-reply-window 900
+  "Seconds to relay an agent's replies after you message it.
+After a message from the phone, the agent's visible output (the text
+it prints in its Claude Code terminal) is streamed back for this many
+seconds.  Thinking traces and tool internals are never relayed — use
+sift or the JSONL on a real screen for those."
+  :type 'integer)
+
+(defcustom magnus-bridge-reply-poll-interval 3
+  "Seconds between checks for new agent output while a reply watch is active."
+  :type 'integer)
+
+(defcustom magnus-bridge-patterns-file
+  (expand-file-name "magnus-bridge-patterns.eld" user-emacs-directory)
+  "File persisting auto-approve patterns learned from the phone."
+  :type 'file)
+
+(defconst magnus-bridge-version "0.2.0")
 
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
@@ -147,6 +167,15 @@ Log, which the bridge relays back to your phone."
 
 (defvar magnus-bridge--heartbeat-timer nil)
 (defvar magnus-bridge--mention-timer nil)
+(defvar magnus-bridge--reply-timer nil)
+
+(defvar magnus-bridge--reply-watches nil
+  "Alist of (INSTANCE-ID . PLIST) for active reply watches.
+The plist has :file, :offset (bytes already relayed) and :until
+\(float-time deadline).")
+
+(defvar magnus-bridge--learned-patterns nil
+  "Auto-approve patterns learned from the phone (persisted separately).")
 
 (defvar magnus-bridge--seen-mentions (make-hash-table :test 'equal)
   "Hash of directory -> list of md5 hashes of already-relayed mention lines.")
@@ -321,6 +350,7 @@ Returns the instance name, or signals an error."
                                          magnus-coord-file
                                        ".magnus-coord.md"))))))
       (magnus-coord-nudge-agent instance message "Hrishi (phone)")
+      (magnus-bridge--watch-replies instance)
       (magnus-instance-name instance))))
 
 (defun magnus-bridge--prompt-tail (instance)
@@ -360,6 +390,148 @@ Returns the instance name, or signals an error."
   (magnus-bridge--emit "attention-clear"
                        :agent (magnus-instance-id instance)
                        :name (magnus-instance-name instance)))
+
+;;; Reply streaming (agent -> phone)
+;;
+;; After the phone messages an agent, that agent's visible output — the
+;; `text' blocks of its session JSONL, i.e. exactly what Claude Code
+;; prints in the vterm — is relayed back for `magnus-bridge-reply-window'
+;; seconds.  Thinking and tool internals are intentionally not relayed.
+
+(defun magnus-bridge--session-file (instance)
+  "Return the session JSONL path for INSTANCE, or nil."
+  (when-let ((directory (magnus-instance-directory instance))
+             (session-id (and (fboundp 'magnus-instance-session-id)
+                              (magnus-instance-session-id instance))))
+    (cond
+     ((fboundp 'magnus-process--session-jsonl-path)
+      (magnus-process--session-jsonl-path directory session-id))
+     (t
+      (expand-file-name
+       (concat session-id ".jsonl")
+       (expand-file-name
+        (replace-regexp-in-string
+         "[^A-Za-z0-9-]" "-" (directory-file-name (expand-file-name directory)))
+        "~/.claude/projects/"))))))
+
+(defun magnus-bridge--watch-replies (instance)
+  "Start or extend the reply watch for INSTANCE."
+  (when-let ((file (ignore-errors (magnus-bridge--session-file instance))))
+    (let* ((id (magnus-instance-id instance))
+           (existing (alist-get id magnus-bridge--reply-watches nil nil #'equal))
+           (size (or (file-attribute-size (file-attributes file)) 0)))
+      (setf (alist-get id magnus-bridge--reply-watches nil nil #'equal)
+            (list :file file
+                  :offset (if existing (plist-get existing :offset) size)
+                  :until (+ (float-time) magnus-bridge-reply-window))))))
+
+(defun magnus-bridge--poll-replies ()
+  "Relay new visible output for every watched agent; expire old watches."
+  (setq magnus-bridge--reply-watches
+        (cl-remove-if (lambda (entry)
+                        (< (plist-get (cdr entry) :until) (float-time)))
+                      magnus-bridge--reply-watches))
+  (dolist (entry magnus-bridge--reply-watches)
+    (let* ((id (car entry))
+           (watch (cdr entry))
+           (instance (magnus-instances-get id)))
+      (when instance
+        (dolist (text (magnus-bridge--read-new-texts watch))
+          (magnus-bridge--emit "reply"
+                               :agent id
+                               :name (magnus-instance-name instance)
+                               :text text))))))
+
+(defun magnus-bridge--read-new-texts (watch)
+  "Read new complete JSONL lines for WATCH; return the agent's text blocks.
+Advances WATCH's :offset past the lines consumed."
+  (let ((file (plist-get watch :file))
+        (offset (plist-get watch :offset))
+        (texts nil))
+    (when (and file (file-readable-p file))
+      (let ((size (or (file-attribute-size (file-attributes file)) 0)))
+        (when (> size offset)
+          (with-temp-buffer
+            (insert-file-contents file nil offset size)
+            ;; Only consume complete lines; a partial tail stays for next poll.
+            (goto-char (point-max))
+            (when (search-backward "\n" nil t)
+              (let ((consumed (buffer-substring-no-properties (point-min) (1+ (point)))))
+                (plist-put watch :offset (+ offset (string-bytes consumed)))
+                (dolist (line (split-string consumed "\n" t))
+                  (when-let ((text (magnus-bridge--entry-text line)))
+                    (push text texts)))))))))
+    (nreverse texts)))
+
+(defun magnus-bridge--entry-text (line)
+  "Return the visible text of JSONL LINE if it is an assistant text block."
+  (when-let ((entry (ignore-errors (json-parse-string line :object-type 'alist))))
+    (when (equal (magnus-bridge--jget entry "type") "assistant")
+      (let* ((message (magnus-bridge--jget entry "message"))
+             (content (magnus-bridge--jget message "content"))
+             (parts nil))
+        (when (vectorp content)
+          (dotimes (i (length content))
+            (let ((block (aref content i)))
+              (when (equal (magnus-bridge--jget block "type") "text")
+                (push (magnus-bridge--jget block "text") parts)))))
+        (let ((text (string-trim (string-join (nreverse parts) "\n"))))
+          (unless (string-empty-p text) text))))))
+
+;;; Auto-approve patterns (taught from the phone)
+
+(defun magnus-bridge--load-patterns ()
+  "Load learned patterns and merge them into the magnus allowlist."
+  (setq magnus-bridge--learned-patterns
+        (when (file-readable-p magnus-bridge-patterns-file)
+          (ignore-errors
+            (with-temp-buffer
+              (insert-file-contents magnus-bridge-patterns-file)
+              (read (current-buffer))))))
+  (when (boundp 'magnus-attention-auto-approve-patterns)
+    (dolist (pattern magnus-bridge--learned-patterns)
+      (add-to-list 'magnus-attention-auto-approve-patterns pattern))))
+
+(defun magnus-bridge--save-patterns ()
+  "Persist learned patterns with restrictive permissions."
+  (with-temp-file magnus-bridge-patterns-file
+    (let ((print-length nil) (print-level nil))
+      (prin1 magnus-bridge--learned-patterns (current-buffer))))
+  (set-file-modes magnus-bridge-patterns-file #o600))
+
+(defun magnus-bridge--pattern-add (pattern)
+  "Learn PATTERN for auto-approval.  Return nil if invalid."
+  (when (and (stringp pattern)
+             (>= (length (string-trim pattern)) 6) ; no trivially-broad patterns
+             (< (length pattern) 200))
+    (let ((pattern (string-trim pattern)))
+      (add-to-list 'magnus-bridge--learned-patterns pattern)
+      (when (boundp 'magnus-attention-auto-approve-patterns)
+        (add-to-list 'magnus-attention-auto-approve-patterns pattern))
+      (magnus-bridge--save-patterns)
+      pattern)))
+
+(defun magnus-bridge--pattern-remove (pattern)
+  "Forget learned PATTERN.  Only phone-learned patterns can be removed."
+  (when (member pattern magnus-bridge--learned-patterns)
+    (setq magnus-bridge--learned-patterns
+          (delete pattern magnus-bridge--learned-patterns))
+    (when (boundp 'magnus-attention-auto-approve-patterns)
+      (setq magnus-attention-auto-approve-patterns
+            (delete pattern magnus-attention-auto-approve-patterns)))
+    (magnus-bridge--save-patterns)
+    t))
+
+(defun magnus-bridge--on-auto-approve (orig instance)
+  "Call ORIG with INSTANCE, surfacing auto-approvals in the phone feed."
+  (let ((approved (funcall orig instance)))
+    (when approved
+      (magnus-bridge--emit
+       "auto-approved"
+       :agent (magnus-instance-id instance)
+       :name (magnus-instance-name instance)
+       :text (or (magnus-bridge--prompt-tail instance) "")))
+    approved))
 
 ;;; Mention watching (agent -> phone)
 
@@ -572,6 +744,18 @@ required, or nil when the request must be rejected."
       (magnus-bridge--handle-send proc body identity))
      ((and (string= method "POST") (string= path "/api/approve"))
       (magnus-bridge--handle-approve proc body identity))
+     ((and (string= method "GET") (string= path "/api/patterns"))
+      (magnus-bridge--respond-json
+       proc "200 OK"
+       `((learned . ,(vconcat magnus-bridge--learned-patterns))
+         (builtin . ,(vconcat
+                      (if (boundp 'magnus-attention-auto-approve-patterns)
+                          (cl-set-difference magnus-attention-auto-approve-patterns
+                                             magnus-bridge--learned-patterns
+                                             :test #'equal)
+                        nil))))))
+     ((and (string= method "POST") (string= path "/api/patterns"))
+      (magnus-bridge--handle-patterns proc body identity))
      (t
       (magnus-bridge--respond-json proc "404 Not Found"
                                    '((error . "not-found")))))))
@@ -691,6 +875,33 @@ Resumes from the Last-Event-ID in HEADERS or a `since' in QUERY."
         proc "400 Bad Request"
         `((error . ,(error-message-string err))))))))
 
+(defun magnus-bridge--handle-patterns (proc body identity)
+  "Handle a pattern add/remove request in BODY from IDENTITY on PROC.
+Patterns are security-relevant standing permissions, so every change is
+audited loudly and only phone-learned patterns can be removed."
+  (let* ((parsed (ignore-errors (json-parse-string body :object-type 'alist)))
+         (action (magnus-bridge--jget parsed "action"))
+         (pattern (magnus-bridge--jget parsed "pattern")))
+    (cond
+     ((and (equal action "add") (magnus-bridge--pattern-add pattern))
+      (magnus-bridge--audit "pattern-learned" pattern
+                            (and (stringp identity) identity))
+      (magnus-bridge--emit "pattern-learned" :text (string-trim pattern))
+      (message "Magnus bridge: phone taught auto-approve pattern %S"
+               (string-trim pattern))
+      (magnus-bridge--respond-json proc "200 OK" '((ok . t))))
+     ((and (equal action "remove") (magnus-bridge--pattern-remove pattern))
+      (magnus-bridge--audit "pattern-removed" pattern
+                            (and (stringp identity) identity))
+      (magnus-bridge--emit "pattern-removed" :text pattern)
+      (magnus-bridge--respond-json proc "200 OK" '((ok . t))))
+     (t
+      (magnus-bridge--audit "pattern-rejected"
+                            (format "%s %s" action pattern)
+                            (and (stringp identity) identity))
+      (magnus-bridge--respond-json proc "400 Bad Request"
+                                   '((error . "bad-pattern")))))))
+
 ;;; Lifecycle
 
 (defun magnus-bridge--heartbeat ()
@@ -723,16 +934,24 @@ Resumes from the Last-Event-ID in HEADERS or a `since' in QUERY."
          :noquery t))
   (setq magnus-bridge--heartbeat-timer
         (run-with-timer 25 25 #'magnus-bridge--heartbeat))
+  (magnus-bridge--load-patterns)
   (when (featurep 'magnus)
     (advice-add 'magnus-attention-request :after
                 #'magnus-bridge--on-attention-request)
     (advice-add 'magnus-attention-release :after
                 #'magnus-bridge--on-attention-release)
+    (when (fboundp 'magnus-attention--try-auto-approve)
+      (advice-add 'magnus-attention--try-auto-approve :around
+                  #'magnus-bridge--on-auto-approve))
     (magnus-bridge--scan-mentions 'prime)
     (setq magnus-bridge--mention-timer
           (run-with-timer magnus-bridge-mention-poll-interval
                           magnus-bridge-mention-poll-interval
-                          #'magnus-bridge--scan-mentions)))
+                          #'magnus-bridge--scan-mentions))
+    (setq magnus-bridge--reply-timer
+          (run-with-timer magnus-bridge-reply-poll-interval
+                          magnus-bridge-reply-poll-interval
+                          #'magnus-bridge--poll-replies)))
   (magnus-bridge--audit "start" (format "port %d" magnus-bridge-port))
   (message "Magnus bridge listening on 127.0.0.1:%d — run M-x magnus-bridge-setup-tailscale to expose it"
            magnus-bridge-port))
@@ -747,10 +966,16 @@ Resumes from the Last-Event-ID in HEADERS or a `since' in QUERY."
   (when magnus-bridge--mention-timer
     (cancel-timer magnus-bridge--mention-timer)
     (setq magnus-bridge--mention-timer nil))
+  (when magnus-bridge--reply-timer
+    (cancel-timer magnus-bridge--reply-timer)
+    (setq magnus-bridge--reply-timer nil))
+  (setq magnus-bridge--reply-watches nil)
   (advice-remove 'magnus-attention-request
                  #'magnus-bridge--on-attention-request)
   (advice-remove 'magnus-attention-release
                  #'magnus-bridge--on-attention-release)
+  (advice-remove 'magnus-attention--try-auto-approve
+                 #'magnus-bridge--on-auto-approve)
   (dolist (client magnus-bridge--sse-clients)
     (ignore-errors (delete-process client)))
   (setq magnus-bridge--sse-clients nil)

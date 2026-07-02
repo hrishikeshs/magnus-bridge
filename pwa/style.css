@@ -88,11 +88,20 @@ header {
 
 .title { font-weight: 700; letter-spacing: 0.4px; }
 
+#settings-btn {
+  margin-left: auto;
+  font-size: 17px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 2px 6px;
+}
+
 .dot {
   width: 9px; height: 9px;
   border-radius: 50%;
   background: var(--bad);
-  margin-left: auto;
+  margin-left: 4px;
   transition: background 0.3s;
 }
 .dot.on { background: var(--ok); }
@@ -129,6 +138,11 @@ header {
 .tab .h.stale { color: var(--warn); }
 .tab .h.stuck, .tab .h.dead { color: var(--bad); }
 .tab .bang { color: var(--warn); font-weight: 700; }
+.tab .unread {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 
 /* ---- feed ---- */
 
@@ -162,11 +176,57 @@ header {
   border-bottom-right-radius: 4px;
 }
 
-.msg.mention {
+.msg.mention,
+.msg.reply {
   align-self: flex-start;
   background: var(--panel);
   border: 1px solid var(--border);
   border-bottom-left-radius: 4px;
+}
+
+.msg.reply { border-left: 2px solid var(--accent); }
+
+.day-sep {
+  align-self: center;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 4px 0;
+}
+
+/* ---- rich text: thinking pills, show-more ---- */
+
+.rich .plain { white-space: pre-wrap; }
+
+.think-pill {
+  display: block;
+  margin: 6px 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+}
+
+.think-body {
+  margin: 6px 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--bg);
+  border-left: 2px dashed var(--border);
+  white-space: pre-wrap;
+}
+
+.show-more {
+  display: block;
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 2px 0;
 }
 
 .msg.system {
@@ -213,30 +273,139 @@ header {
   border-radius: 10px;
 }
 .attention .keys button:active { background: var(--sent); }
+.attention .keys .esc { flex: 0 0 44px; }
+.attention .always {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--ok);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
 .attention.resolved { border-color: var(--border); opacity: 0.55; }
-.attention.resolved .keys { display: none; }
+.attention.resolved .keys, .attention.resolved .always { display: none; }
+
+/* ---- modals ---- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal-box {
+  width: 100%;
+  max-width: 480px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 18px 16px calc(env(safe-area-inset-bottom) + 18px);
+}
+
+.modal-box h2 { font-size: 16px; margin-bottom: 8px; }
+.modal-box p { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.modal-box .hint { min-height: 16px; color: var(--warn); }
+
+.modal-box input {
+  width: 100%;
+  padding: 10px 12px;
+  font: 14px ui-monospace, "SF Mono", monospace;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
+
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-actions button {
+  padding: 9px 16px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.modal-actions .primary {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.pattern-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pattern-row code {
+  flex: 1;
+  font: 13px ui-monospace, "SF Mono", monospace;
+  word-break: break-all;
+}
+.pattern-row button {
+  color: var(--bad);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
 
 /* ---- composer ---- */
 
-#composer {
+footer { border-top: 1px solid var(--border); }
+
+#chips {
   display: flex;
   gap: 8px;
-  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
-  border-top: 1px solid var(--border);
+  padding: 8px 12px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+#chips::-webkit-scrollbar { display: none; }
 
-#msg-input {
-  flex: 1;
-  padding: 10px 14px;
-  font-size: 16px;
-  color: var(--text);
+.chip {
+  flex: none;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--accent);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 999px;
 }
 
+#composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+}
+
+#msg-input {
+  flex: 1;
+  padding: 10px 14px;
+  font: 16px/1.4 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  resize: none;
+  max-height: 120px;
+}
+
 #send-btn {
   width: 42px;
+  height: 42px;
+  flex: none;
   font-size: 18px;
   font-weight: 700;
   color: var(--bg);

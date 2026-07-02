@@ -11,7 +11,9 @@
   (setq magnus-bridge-require-tailscale-identity nil
         magnus-bridge-port 8399
         magnus-bridge-token-file (expand-file-name "tokens.eld" dir)
-        magnus-bridge-audit-file (expand-file-name "audit.log" dir))
+        magnus-bridge-audit-file (expand-file-name "audit.log" dir)
+        magnus-bridge-patterns-file (expand-file-name "patterns.eld" dir)
+        magnus-bridge-reply-poll-interval 1)
   (magnus-bridge-start)
   (with-temp-file (expand-file-name "pair-code" dir)
     (insert (magnus-bridge-pair)))

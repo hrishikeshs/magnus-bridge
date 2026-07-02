@@ -9,18 +9,24 @@
 (require 'cl-lib)
 
 (cl-defstruct (magnus-instance (:constructor magnus-instance--create))
-  id name directory buffer status)
+  id name directory buffer status session-id)
 
 (defvar magnus-stub-sent nil
   "List of (ID . MESSAGE) delivered via the stubbed nudge.")
 
 (defvar magnus-attention-queue nil)
+(defvar magnus-attention-auto-approve-patterns nil)
 (defvar magnus-coord-file ".magnus-coord.md")
 
 (defvar magnus-stub-instances
   (list (magnus-instance--create
          :id "stub-1" :name "test-fox"
-         :directory temporary-file-directory :status 'running)))
+         :directory temporary-file-directory :status 'running
+         :session-id "sess-test")))
+
+(defun magnus-process--session-jsonl-path (_directory session-id)
+  (expand-file-name (concat session-id ".jsonl")
+                    (or (getenv "MB_TEST_DIR") temporary-file-directory)))
 
 (defun magnus-instances-active-list () magnus-stub-instances)
 
