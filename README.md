@@ -9,6 +9,24 @@ third party between your thumb and your agents**. Not this repo's
 author, not a bot platform, not a push service. Your editor, your
 tailnet, your crew.
 
+## Screenshots
+
+**Chatting with an agent — replies stream back, thinking stays folded:**
+
+<img src="screenshots/chat.png" width="380" alt="Chat with an agent">
+
+**Tap to read the agent's reasoning; auto-approvals surface in the feed; typing dots are real agent activity:**
+
+<img src="screenshots/thinking.png" width="380" alt="Expanded thinking, auto-approve events, typing indicator">
+
+**The attention flow — permission prompt, approve from anywhere, reply lands:**
+
+<img src="screenshots/attention.png" width="380" alt="Attention card and approval">
+
+> "Ten years ago this sentence was science fiction; today it's a Tuesday
+> in the den." — quick-wolf, an agent, upon receiving a text from a
+> sidewalk
+
 ## What it feels like
 
 - 💬 **Chat** — message any agent; it lands in their terminal as
