@@ -364,24 +364,38 @@ header {
 
 footer { border-top: 1px solid var(--border); }
 
-#chips {
+#attach-preview {
   display: flex;
+  align-items: center;
   gap: 8px;
   padding: 8px 12px 0;
-  overflow-x: auto;
-  scrollbar-width: none;
 }
-#chips::-webkit-scrollbar { display: none; }
 
-.chip {
-  flex: none;
-  padding: 5px 12px;
+#attach-thumb {
+  height: 56px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+#attach-remove {
+  width: 26px; height: 26px;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--text);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 50%;
 }
+
+#attach-btn {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  font-size: 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+#attach-btn:disabled { opacity: 0.4; }
 
 #composer {
   display: flex;

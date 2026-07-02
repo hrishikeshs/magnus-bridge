@@ -89,6 +89,20 @@ case "$history" in
   *) pass=$((pass + 1)); echo "ok   - thinking blocks not relayed" ;;
 esac
 
+# Upload: 4KB of fake JPEG bytes, base64'd. Server must save the file
+# and nudge the agent with its path.
+FAKE_IMG=$(head -c 4096 /dev/urandom | base64 | tr -d '\n')
+UPLOAD_BODY="{\"agent\":\"stub-1\",\"text\":\"look at this\",\"image\":\"$FAKE_IMG\"}"
+check "upload accepted"            200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d "$UPLOAD_BODY" $MB/api/upload)"
+if ls "$DIR"/attachments/photo-*.jpg >/dev/null 2>&1; then
+  pass=$((pass + 1)); echo "ok   - photo saved to attachments dir"
+else
+  fail=$((fail + 1)); echo "FAIL - no photo file written"
+fi
+check "garbage upload rejected"    400 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","image":"!!!"}' $MB/api/upload)"
+
 check "pattern too short rejected" 400 "$(code -b "$DIR/cookies" "${J[@]}" \
   -d '{"action":"add","pattern":"rm"}' $MB/api/patterns)"
 check "pattern learned"            200 "$(code -b "$DIR/cookies" "${J[@]}" \

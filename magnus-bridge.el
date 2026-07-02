@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 
@@ -105,18 +105,21 @@ Disable only for local development and testing."
   "Number of events kept for reconnecting clients."
   :type 'integer)
 
-(defcustom magnus-bridge-reply-hint t
-  "When non-nil, append a hint telling agents how to reply.
-The hint directs agents to @hrishi-style mentions in the coordination
-Log, which the bridge relays back to your phone."
-  :type 'boolean)
-
 (defcustom magnus-bridge-user-mention "hrishi"
   "Mention name agents use to message you (without the @)."
   :type 'string)
 
 (defcustom magnus-bridge-max-message-length 4000
   "Maximum accepted length for an inbound chat message."
+  :type 'integer)
+
+(defcustom magnus-bridge-attachments-directory
+  (expand-file-name "magnus-bridge-attachments" user-emacs-directory)
+  "Directory where photos sent from the phone are stored for agents."
+  :type 'directory)
+
+(defcustom magnus-bridge-max-upload-bytes (* 20 1024 1024)
+  "Maximum accepted HTTP request body size in bytes."
   :type 'integer)
 
 (defcustom magnus-bridge-mention-poll-interval 10
@@ -140,7 +143,7 @@ sift or the JSONL on a real screen for those."
   "File persisting auto-approve patterns learned from the phone."
   :type 'file)
 
-(defconst magnus-bridge-version "0.2.0")
+(defconst magnus-bridge-version "0.3.0")
 
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
@@ -341,17 +344,12 @@ second factor."
 Returns the instance name, or signals an error."
   (let ((instance (magnus-instances-get id)))
     (unless instance (error "No such agent"))
-    (let ((message (concat (string-trim
-                            (replace-regexp-in-string "[\n\r]+" " " text))
-                           (when magnus-bridge-reply-hint
-                             (format " [reply: add a Log line with @%s in %s]"
-                                     magnus-bridge-user-mention
-                                     (if (boundp 'magnus-coord-file)
-                                         magnus-coord-file
-                                       ".magnus-coord.md"))))))
-      (magnus-coord-nudge-agent instance message "Hrishi (phone)")
-      (magnus-bridge--watch-replies instance)
-      (magnus-instance-name instance))))
+    (magnus-coord-nudge-agent
+     instance
+     (string-trim (replace-regexp-in-string "[\n\r]+" " " text))
+     "Hrishi (phone)")
+    (magnus-bridge--watch-replies instance)
+    (magnus-instance-name instance)))
 
 (defun magnus-bridge--prompt-tail (instance)
   "Return the trailing prompt text of INSTANCE's buffer, or nil."
@@ -664,7 +662,7 @@ required, or nil when the request must be rejected."
 
 ;;; Connection handling
 
-(defun magnus-bridge--filter (proc chunk)
+(cl-defun magnus-bridge--filter (proc chunk)
   "Accumulate CHUNK for PROC and dispatch when a full request arrived."
   (let ((buffered (concat (or (process-get proc 'mb-buffer) "") chunk)))
     (process-put proc 'mb-buffer buffered)
@@ -682,6 +680,11 @@ required, or nil when the request must be rejected."
              (content-length (string-to-number
                               (or (cdr (assoc "content-length" headers)) "0")))
              (body-start (+ header-end 4)))
+        (when (> content-length magnus-bridge-max-upload-bytes)
+          (process-put proc 'mb-buffer nil)
+          (magnus-bridge--respond-json proc "413 Payload Too Large"
+                                       '((error . "too-large")))
+          (cl-return-from magnus-bridge--filter))
         (when (>= (- (string-bytes buffered) body-start) content-length)
           (process-put proc 'mb-buffer nil)
           (magnus-bridge--dispatch
@@ -742,6 +745,8 @@ required, or nil when the request must be rejected."
          `((events . ,(vconcat (magnus-bridge--events-since since)))))))
      ((and (string= method "POST") (string= path "/api/send"))
       (magnus-bridge--handle-send proc body identity))
+     ((and (string= method "POST") (string= path "/api/upload"))
+      (magnus-bridge--handle-upload proc body identity))
      ((and (string= method "POST") (string= path "/api/approve"))
       (magnus-bridge--handle-approve proc body identity))
      ((and (string= method "GET") (string= path "/api/patterns"))
@@ -874,6 +879,46 @@ Resumes from the Last-Event-ID in HEADERS or a `since' in QUERY."
        (magnus-bridge--respond-json
         proc "400 Bad Request"
         `((error . ,(error-message-string err))))))))
+
+(defun magnus-bridge--handle-upload (proc body identity)
+  "Handle a photo upload in BODY from IDENTITY on PROC.
+The image is saved on this machine and the agent is pointed at the
+path — Claude Code agents can Read image files directly.  The server
+chooses the filename; client names are never trusted."
+  (let* ((parsed (ignore-errors (json-parse-string body :object-type 'alist)))
+         (agent (magnus-bridge--jget parsed "agent"))
+         (text (or (magnus-bridge--jget parsed "text") ""))
+         (image (magnus-bridge--jget parsed "image"))
+         (data (and (stringp image)
+                    (ignore-errors (base64-decode-string image)))))
+    (cond
+     ((or (null data) (< (length data) 100))
+      (magnus-bridge--respond-json proc "400 Bad Request"
+                                   '((error . "bad-image"))))
+     (t
+      (condition-case err
+          (let* ((file (expand-file-name
+                        (format-time-string "photo-%Y%m%d-%H%M%S%3N.jpg" nil t)
+                        magnus-bridge-attachments-directory))
+                 (message-text
+                  (format "%s [photo saved at %s — use the Read tool to view it]"
+                          (string-trim text) file)))
+            (make-directory magnus-bridge-attachments-directory t)
+            (let ((coding-system-for-write 'no-conversion))
+              (write-region data nil file nil 0))
+            (set-file-modes file #o600)
+            (let ((name (magnus-bridge--send-to-agent agent message-text)))
+              (magnus-bridge--audit "upload"
+                                    (format "%s <- %s (%d bytes)"
+                                            name file (length data))
+                                    (and (stringp identity) identity))
+              (magnus-bridge--emit "sent" :agent agent :name name
+                                   :text (concat (string-trim text) " 📷 photo"))
+              (magnus-bridge--respond-json proc "200 OK" '((ok . t)))))
+        (error
+         (magnus-bridge--respond-json
+          proc "400 Bad Request"
+          `((error . ,(error-message-string err))))))))))
 
 (defun magnus-bridge--handle-patterns (proc body identity)
   "Handle a pattern add/remove request in BODY from IDENTITY on PROC.

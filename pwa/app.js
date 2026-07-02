@@ -5,7 +5,6 @@
 
 const $ = (id) => document.getElementById(id);
 
-const QUICK_REPLIES = ['status?', 'carry on', 'ship it', 'check coord'];
 const HEALTH_GLYPHS = { ok: '●', stale: '◐', stuck: '·', dead: '✕' };
 const HEALTH_LABELS = { stuck: 'idle', stale: 'quiet' };
 
@@ -199,8 +198,9 @@ function renderFeed() {
   $('msg-input').placeholder = state.selected === 'all'
     ? 'Pick an agent to message…'
     : 'Message ' + (agentName(state.selected) || 'agent') + '…';
-  $('send-btn').disabled = state.selected === 'all';
-  $('chips').classList.toggle('hidden', state.selected === 'all');
+  const noAgent = state.selected === 'all';
+  $('send-btn').disabled = noAgent;
+  $('attach-btn').disabled = noAgent;
 }
 
 function agentName(id) {
@@ -465,28 +465,63 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-const chipsRow = $('chips');
-for (const text of QUICK_REPLIES) {
-  const b = document.createElement('button');
-  b.className = 'chip';
-  b.textContent = text;
-  b.onclick = () => {
-    input.value = input.value ? input.value + ' ' + text : text;
-    localStorage.setItem(draftKey(), input.value);
-    autogrow();
-    input.focus();
-  };
-  chipsRow.appendChild(b);
+/* ---------- attachments ---------- */
+
+let pendingImage = null; // base64 payload (no data: prefix)
+
+$('attach-btn').addEventListener('click', () => $('attach-input').click());
+
+$('attach-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const dataUrl = await downscale(file).catch(() => null);
+  if (!dataUrl) return;
+  pendingImage = dataUrl.split(',')[1];
+  $('attach-thumb').src = dataUrl;
+  $('attach-preview').classList.remove('hidden');
+});
+
+$('attach-remove').addEventListener('click', clearAttachment);
+
+function clearAttachment() {
+  pendingImage = null;
+  $('attach-thumb').src = '';
+  $('attach-preview').classList.add('hidden');
+}
+
+/* Re-encode client-side: caps dimensions at 2048px and always produces
+   JPEG — smaller uploads and HEIC handled for free by the canvas. */
+function downscale(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, 2048 / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
 }
 
 async function sendMessage() {
   const body = input.value.trim();
-  if (!body || state.selected === 'all') return;
+  const image = pendingImage;
+  if ((!body && !image) || state.selected === 'all') return;
   input.value = '';
   localStorage.removeItem(draftKey());
+  clearAttachment();
   autogrow();
   requestNotifyPermission();
-  const res = await api('/api/send', { agent: state.selected, text: body });
+  const res = image
+    ? await api('/api/upload', { agent: state.selected, text: body, image })
+    : await api('/api/send', { agent: state.selected, text: body });
   if (!res || !res.ok) {
     input.value = body;   // give the message back rather than losing it
     localStorage.setItem(draftKey(), body);

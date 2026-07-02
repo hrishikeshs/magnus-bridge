@@ -35,8 +35,13 @@
     <nav id="agent-tabs"></nav>
     <main id="feed"></main>
     <footer>
-      <div id="chips" class="hidden"></div>
+      <div id="attach-preview" class="hidden">
+        <img id="attach-thumb" alt="">
+        <button id="attach-remove">✕</button>
+      </div>
       <div id="composer">
+        <button id="attach-btn" title="send a photo">📷</button>
+        <input id="attach-input" type="file" accept="image/*" class="hidden">
         <textarea id="msg-input" rows="1" placeholder="Message the crew…"
                   autocomplete="off"></textarea>
         <button id="send-btn">↑</button>
