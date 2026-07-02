@@ -186,8 +186,8 @@ Prefers openssl; falls back to Emacs `random'."
                       action
                       (replace-regexp-in-string "[\n\t]" " " (or detail "")))))
     (ignore-errors
-      (let ((save-silently t))
-        (append-to-file line nil magnus-bridge-audit-file))
+      ;; write-region with VISIT of 0: append without echo-area noise.
+      (write-region line nil magnus-bridge-audit-file 'append 0)
       (set-file-modes magnus-bridge-audit-file #o600))))
 
 ;;; Tokens and pairing
