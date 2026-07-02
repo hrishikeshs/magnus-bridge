@@ -35,7 +35,7 @@ async function init() {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
   const res = await fetch('/api/status').catch(() => null);
-  if (!res) return showPairing();          // offline or unreachable
+  if (!res) return showOffline();          // unreachable: show cached feed
   if (res.status === 401) return showPairing();
   const data = await res.json();
   state.agents = data.agents || [];
@@ -46,6 +46,28 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) { refreshStatus(); connectEvents(); }
   });
+}
+
+/* Server unreachable (laptop asleep, Emacs restarting): show the last
+   cached conversation read-only, and retry until the bridge is back. */
+function showOffline() {
+  const cached = JSON.parse(localStorage.getItem('eventCache') || 'null');
+  if (cached) {
+    state.agents = cached.agents || [];
+    cached.events.forEach(ingest);
+  }
+  showApp();
+  setConnected(false);
+  setTimeout(init, 5000);
+}
+
+function cacheEvents() {
+  try {
+    localStorage.setItem('eventCache', JSON.stringify({
+      agents: state.agents,
+      events: state.events.slice(-100),
+    }));
+  } catch (e) { /* storage full — cache is best-effort */ }
 }
 
 function showPairing() {
@@ -92,6 +114,7 @@ async function loadHistory() {
   if (!res || !res.ok) return;
   const data = await res.json();
   (data.events || []).forEach(ingest);
+  cacheEvents();
   renderFeed();
 }
 
@@ -109,6 +132,7 @@ function connectEvents() {
       return;
     }
     ingest(event);
+    cacheEvents();
     renderFeed();
     renderTabs();
     maybeNotify(event);
@@ -418,7 +442,10 @@ function extractPattern(text) {
 }
 
 function openAlwaysAllow(event) {
-  $('allow-pattern').value = extractPattern(event.text);
+  const guess = extractPattern(event.text);
+  $('allow-pattern').value = guess;
+  $('allow-pattern').placeholder = guess
+    ? '' : 'type the prompt text to match (min 6 chars)';
   $('allow-modal').classList.remove('hidden');
   $('allow-confirm').onclick = async () => {
     const pattern = $('allow-pattern').value.trim();

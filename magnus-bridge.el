@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 
@@ -123,8 +123,10 @@ Disable only for local development and testing."
   "Number of events kept for reconnecting clients."
   :type 'integer)
 
-(defcustom magnus-bridge-user-mention "hrishi"
-  "Mention name agents use to message you (without the @)."
+(defcustom magnus-bridge-user-mention (user-login-name)
+  "Mention name agents use to message you (without the @).
+Agents writing @<this-name> in the coordination Log reach your phone.
+Defaults to your login name; set it to whatever your agents call you."
   :type 'string)
 
 (defcustom magnus-bridge-max-message-length 4000
@@ -166,7 +168,7 @@ sift or the JSONL on a real screen for those."
   "File persisting chat history across Emacs restarts (mode 0600)."
   :type 'file)
 
-(defconst magnus-bridge-version "0.5.0")
+(defconst magnus-bridge-version "0.5.1")
 
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
@@ -203,6 +205,9 @@ The plist has :file, :offset (bytes already relayed) and :until
 (defvar magnus-bridge--learned-patterns nil
   "Auto-approve patterns learned from the phone (persisted separately).")
 
+(defvar magnus-bridge--history-appends 0
+  "Lines appended to the history file since the last compaction.")
+
 (defvar magnus-bridge--seen-mentions (make-hash-table :test 'equal)
   "Hash of directory -> list of md5 hashes of already-relayed mention lines.")
 
@@ -210,7 +215,11 @@ The plist has :file, :offset (bytes already relayed) and :until
 
 (defun magnus-bridge--random-hex (nbytes)
   "Return NBYTES of cryptographically random data as a hex string.
-Prefers openssl; falls back to Emacs `random'."
+Prefers openssl.  The fallback uses Emacs' `random', which is
+time-seeded and NOT cryptographically strong — acceptable for a
+2-minute single-use pairing code, weak for a year-long device token.
+In practice any machine running Emacs + Tailscale has openssl; the
+fallback warns loudly on the off chance it ever fires."
   (let ((out (ignore-errors
                (with-temp-buffer
                  (when (zerop (call-process "openssl" nil t nil
@@ -219,10 +228,10 @@ Prefers openssl; falls back to Emacs `random'."
                    (string-trim (buffer-string)))))))
     (if (and out (= (length out) (* 2 nbytes)))
         out
-      (progn
-        (random t)
-        (mapconcat (lambda (_) (format "%02x" (random 256)))
-                   (make-list nbytes 0) "")))))
+      (message "Magnus bridge WARNING: openssl unavailable — falling back to a weak PRNG for secrets")
+      (random t)
+      (mapconcat (lambda (_) (format "%02x" (random 256)))
+                 (make-list nbytes 0) ""))))
 
 (defun magnus-bridge--now ()
   "Current UTC timestamp string."
@@ -322,9 +331,22 @@ second factor."
     (ignore-errors
       (write-region (concat (json-serialize event) "\n") nil
                     magnus-bridge-history-file 'append 0)
-      (set-file-modes magnus-bridge-history-file #o600))
+      (set-file-modes magnus-bridge-history-file #o600)
+      ;; Compact periodically, not only at startup: Emacs sessions here
+      ;; run for weeks, so the file would otherwise grow unbounded.
+      (when (> (cl-incf magnus-bridge--history-appends)
+               (* 2 magnus-bridge-history-size))
+        (magnus-bridge--compact-history)))
     (magnus-bridge--broadcast event)
     event))
+
+(defun magnus-bridge--compact-history ()
+  "Rewrite the history file from the in-memory event list."
+  (with-temp-file magnus-bridge-history-file
+    (dolist (event (reverse magnus-bridge--events))
+      (insert (json-serialize event) "\n")))
+  (set-file-modes magnus-bridge-history-file #o600)
+  (setq magnus-bridge--history-appends 0))
 
 (defun magnus-bridge--load-history ()
   "Restore persisted events so history survives Emacs restarts.
@@ -350,10 +372,7 @@ has grown far past what is retained."
     (when (> (or (file-attribute-size
                   (file-attributes magnus-bridge-history-file)) 0)
              (* 2 1024 1024))
-      (with-temp-file magnus-bridge-history-file
-        (dolist (event (reverse magnus-bridge--events))
-          (insert (json-serialize event) "\n")))
-      (set-file-modes magnus-bridge-history-file #o600))))
+      (magnus-bridge--compact-history))))
 
 (defun magnus-bridge--parse-event (line)
   "Parse a persisted event LINE, normalizing keys back to symbols."
@@ -544,12 +563,22 @@ Advances WATCH's :offset past the lines consumed."
         (offset (plist-get watch :offset))
         (texts nil))
     (when (and file (file-readable-p file))
-      (let ((size (or (file-attribute-size (file-attributes file)) 0)))
+      (let* ((full-size (or (file-attribute-size (file-attributes file)) 0))
+             ;; Cap each poll's read; a partial tail line simply waits
+             ;; for the next poll, so large bursts drain incrementally.
+             (size (min full-size (+ offset (* 256 1024)))))
         (when (> size offset)
           (with-temp-buffer
             (insert-file-contents file nil offset size)
-            ;; Only consume complete lines; a partial tail stays for next poll.
             (goto-char (point-max))
+            ;; A single line larger than the cap would never contain a
+            ;; newline and stall the watch — take the full range then.
+            (when (and (< size full-size)
+                       (not (save-excursion (search-backward "\n" nil t))))
+              (erase-buffer)
+              (insert-file-contents file nil offset full-size)
+              (goto-char (point-max)))
+            ;; Only consume complete lines; a partial tail stays for next poll.
             (when (search-backward "\n" nil t)
               (let ((consumed (buffer-substring-no-properties (point-min) (1+ (point)))))
                 (plist-put watch :offset (+ offset (string-bytes consumed)))
