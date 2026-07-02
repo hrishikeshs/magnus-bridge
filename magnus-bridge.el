@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 
@@ -143,7 +143,12 @@ sift or the JSONL on a real screen for those."
   "File persisting auto-approve patterns learned from the phone."
   :type 'file)
 
-(defconst magnus-bridge-version "0.4.0")
+(defcustom magnus-bridge-history-file
+  (expand-file-name "magnus-bridge-history.jsonl" user-emacs-directory)
+  "File persisting chat history across Emacs restarts (mode 0600)."
+  :type 'file)
+
+(defconst magnus-bridge-version "0.5.0")
 
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
@@ -296,8 +301,51 @@ second factor."
     (push event magnus-bridge--events)
     (when (> (length magnus-bridge--events) magnus-bridge-history-size)
       (setcdr (nthcdr (1- magnus-bridge-history-size) magnus-bridge--events) nil))
+    (ignore-errors
+      (write-region (concat (json-serialize event) "\n") nil
+                    magnus-bridge-history-file 'append 0)
+      (set-file-modes magnus-bridge-history-file #o600))
     (magnus-bridge--broadcast event)
     event))
+
+(defun magnus-bridge--load-history ()
+  "Restore persisted events so history survives Emacs restarts.
+Loads only when the in-memory history is empty, keeps the newest
+`magnus-bridge-history-size' events, and compacts the file when it
+has grown far past what is retained."
+  (when (and (null magnus-bridge--events)
+             (file-readable-p magnus-bridge-history-file))
+    (with-temp-buffer
+      (insert-file-contents magnus-bridge-history-file)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (point) (line-end-position))))
+          (when-let ((event (magnus-bridge--parse-event line)))
+            (push event magnus-bridge--events)))
+        (forward-line 1)))
+    (when (> (length magnus-bridge--events) magnus-bridge-history-size)
+      (setcdr (nthcdr (1- magnus-bridge-history-size) magnus-bridge--events) nil))
+    (dolist (event magnus-bridge--events)
+      (setq magnus-bridge--event-counter
+            (max magnus-bridge--event-counter (or (alist-get 'id event) 0))))
+    (when (> (or (file-attribute-size
+                  (file-attributes magnus-bridge-history-file)) 0)
+             (* 2 1024 1024))
+      (with-temp-file magnus-bridge-history-file
+        (dolist (event (reverse magnus-bridge--events))
+          (insert (json-serialize event) "\n")))
+      (set-file-modes magnus-bridge-history-file #o600))))
+
+(defun magnus-bridge--parse-event (line)
+  "Parse a persisted event LINE, normalizing keys back to symbols."
+  (when-let ((parsed (and (not (string-empty-p line))
+                          (ignore-errors
+                            (json-parse-string line :object-type 'alist)))))
+    (mapcar (lambda (pair)
+              (cons (if (stringp (car pair)) (intern (car pair)) (car pair))
+                    (cdr pair)))
+            parsed)))
 
 (defun magnus-bridge--broadcast (event)
   "Send EVENT to all connected SSE clients."
@@ -332,10 +380,13 @@ SSE frame carries no id so reconnect cursors are unaffected."
             (delq client magnus-bridge--sse-clients)))))
 
 (defun magnus-bridge--events-since (since)
-  "Return events with id greater than SINCE, oldest first."
-  (nreverse (cl-remove-if-not
-             (lambda (e) (> (alist-get 'id e) since))
-             magnus-bridge--events)))
+  "Return events with id greater than SINCE, oldest first.
+Uses non-destructive `reverse': `cl-remove-if-not' may share structure
+with `magnus-bridge--events', and reversing shared cells in place
+destroys the history it is supposed to be reading."
+  (reverse (cl-remove-if-not
+            (lambda (e) (> (alist-get 'id e) since))
+            magnus-bridge--events)))
 
 ;;; Magnus integration
 
@@ -995,6 +1046,7 @@ audited loudly and only phone-learned patterns can be removed."
   (when magnus-bridge--server
     (user-error "Magnus bridge is already running"))
   (magnus-bridge--load-tokens)
+  (magnus-bridge--load-history)
   (setq magnus-bridge--server
         (make-network-process
          :name "magnus-bridge"

@@ -135,6 +135,41 @@ check "pattern removed"            200 "$(code -b "$DIR/cookies" "${J[@]}" \
 check "unknown pattern remove"     400 "$(code -b "$DIR/cookies" "${J[@]}" \
   -d '{"action":"remove","pattern":"never-existed-xyz"}' $MB/api/patterns)"
 
+# History must be repeatable: reading it twice returns the same events
+# (regression: destructive nreverse on shared list structure emptied the
+# history a little more on every page refresh).
+h1=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+h2=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+case "$h1" in *'smoke hello'*) ok1=y ;; *) ok1=n ;; esac
+case "$h2" in *'smoke hello'*) ok2=y ;; *) ok2=n ;; esac
+if [ "$ok1$ok2" = "yy" ]; then
+  pass=$((pass + 1)); echo "ok   - history is repeatable"
+else
+  fail=$((fail + 1)); echo "FAIL - history not repeatable (1st=$ok1 2nd=$ok2)"
+fi
+
+# History must survive a server restart (persisted to history.jsonl).
+pkill -P "$SERVER_PID" 2>/dev/null || true
+kill "$SERVER_PID" 2>/dev/null || true
+for _ in $(seq 20); do
+  lsof -nP -iTCP:8399 -sTCP:LISTEN >/dev/null 2>&1 || break
+  sleep 0.25
+done
+: > "$DIR/server.log"
+MB_TEST_DIR="$DIR" "${EMACS:-emacs}" -Q --batch -L . -L test \
+  -l magnus-stub -l magnus-bridge -l test/run-server.el \
+  >"$DIR/server.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 40); do
+  grep -q "test server ready" "$DIR/server.log" 2>/dev/null && break
+  sleep 0.25
+done
+h3=$(curl -s -b "$DIR/cookies" "$MB/api/history?since=0")
+case "$h3" in
+  *'smoke hello'*) pass=$((pass + 1)); echo "ok   - history survives restart" ;;
+  *) fail=$((fail + 1)); echo "FAIL - history lost after restart: $h3" ;;
+esac
+
 echo "----"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
