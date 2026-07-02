@@ -13,15 +13,21 @@ tailnet, your crew.
 
 **Chatting with an agent — replies stream back, thinking stays folded:**
 
-<img src="screenshots/chat.png" width="380" alt="Chat with an agent">
+<p align="center">
+  <img src="screenshots/chat.png" width="380" alt="Chat with an agent">
+</p>
 
 **Tap to read the agent's reasoning; auto-approvals surface in the feed; typing dots are real agent activity:**
 
-<img src="screenshots/thinking.png" width="380" alt="Expanded thinking, auto-approve events, typing indicator">
+<p align="center">
+  <img src="screenshots/thinking.png" width="380" alt="Expanded thinking, auto-approve events, typing indicator">
+</p>
 
 **The attention flow — permission prompt, approve from anywhere, reply lands:**
 
-<img src="screenshots/attention.png" width="380" alt="Attention card and approval">
+<p align="center">
+  <img src="screenshots/attention.png" width="380" alt="Attention card and approval">
+</p>
 
 > "Ten years ago this sentence was science fiction; today it's a Tuesday
 > in the den." — quick-wolf, an agent, upon receiving a text from a
