@@ -61,8 +61,7 @@
 ;;   magnus-bridge-auth.el    identity, pairing, tokens, audit
 ;;   magnus-bridge-events.el  event log, SSE, durable history
 ;;   magnus-bridge-agents.el  magnus integration, replies, patterns
-;;   magnus-bridge-server.el  the HTTP/1.1 machine
-;;   magnus-bridge-api.el     routing, handlers, PWA serving
+;;   magnus-bridge-api.el     HTTP server, routing, PWA serving
 
 ;;; Code:
 
@@ -72,7 +71,6 @@
 (require 'magnus-bridge-auth)
 (require 'magnus-bridge-events)
 (require 'magnus-bridge-agents)
-(require 'magnus-bridge-server)
 (require 'magnus-bridge-api)
 
 (defcustom magnus-bridge-port 8377
