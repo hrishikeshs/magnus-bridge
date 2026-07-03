@@ -520,6 +520,26 @@ input.addEventListener('input', () => {
   autogrow();
 });
 
+/* iOS shows a Prev/Next/Done accessory bar above the keyboard whenever
+   the page has more than one focusable element. While the composer is
+   focused, take every other control out of the tab order (taps still
+   work) so Safari sees a single input and drops the bar — the
+   iMessage-clean keyboard. Restored on blur for desktop keyboard users. */
+function setComposerFocusMode(on) {
+  document.querySelectorAll('button, [href], input, [tabindex]').forEach((el) => {
+    if (el === input) return;
+    if (on) {
+      if (!el.dataset.tabSaved) el.dataset.tabSaved = el.tabIndex;
+      el.tabIndex = -1;
+    } else if (el.dataset.tabSaved !== undefined) {
+      el.tabIndex = Number(el.dataset.tabSaved);
+      delete el.dataset.tabSaved;
+    }
+  });
+}
+input.addEventListener('focus', () => setComposerFocusMode(true));
+input.addEventListener('blur', () => setComposerFocusMode(false));
+
 const coarsePointer = matchMedia('(pointer: coarse)').matches;
 input.addEventListener('keydown', (e) => {
   // Desktop: Enter sends, Shift+Enter breaks. Touch: Enter always breaks

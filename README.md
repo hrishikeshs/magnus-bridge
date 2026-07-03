@@ -23,7 +23,7 @@ tailnet, your crew.
   <img src="screenshots/thinking.png" width="380" alt="Expanded thinking, auto-approve events, typing indicator">
 </p>
 
-**The attention flow — permission prompt, approve from anywhere, reply lands:**
+**Permission prompts become tappable cards — labeled buttons parsed from the real prompt, or teach a pattern with "Always allow this":**
 
 <p align="center">
   <img src="screenshots/attention.png" width="380" alt="Attention card and approval">

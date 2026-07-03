@@ -42,8 +42,11 @@
       <div id="composer">
         <button id="attach-btn" title="send a photo">📷</button>
         <input id="attach-input" type="file" accept="image/*" class="hidden">
+        <!-- Attributes + the focus dance in app.js suppress iOS's
+             keyboard accessory bar (see: single focusable element rule) -->
         <textarea id="msg-input" rows="1" placeholder="Message the crew…"
-                  autocomplete="off"></textarea>
+                  autocomplete="off" autocorrect="off" autocapitalize="none"
+                  inputmode="text"></textarea>
         <button id="send-btn">↑</button>
       </div>
     </footer>
