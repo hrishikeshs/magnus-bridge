@@ -8,11 +8,11 @@ EMACS ?= emacs
 compile:
 	$(EMACS) -Q --batch -L . \
 	  --eval '(setq byte-compile-error-on-warn t)' \
-	  -f batch-byte-compile magnus-bridge.el
+	  -f batch-byte-compile magnus-bridge*.el
 
 checkdoc:
 	$(EMACS) -Q --batch \
-	  --eval '(checkdoc-file "magnus-bridge.el")'
+	  --eval '(dolist (f (directory-files "." nil "magnus-bridge.*\\.el$")) (checkdoc-file f))'
 
 test: compile
 	./test/smoke.sh
