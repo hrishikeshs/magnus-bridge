@@ -139,7 +139,7 @@ Returns the instance name, or signals an error."
     (magnus-coord-nudge-agent
      instance
      (string-trim (replace-regexp-in-string "[\n\r]+" " " text))
-     "Hrishi (phone)")
+     (format "%s (phone)" magnus-bridge-user-mention))
     (magnus-bridge--watch-replies instance)
     (magnus-instance-name instance)))
 
@@ -379,6 +379,7 @@ starting the bridge does not replay history."
                                      :name (or (cdr agent) "crew")
                                      :text (string-trim line)))))))
       (puthash file seen magnus-bridge--seen-mentions))))
+
 (provide 'magnus-bridge-agents)
 
 ;;; magnus-bridge-agents.el ends here

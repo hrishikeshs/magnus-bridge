@@ -191,6 +191,7 @@ required, or nil when the request must be rejected."
   "Open the bridge audit log."
   (interactive)
   (find-file magnus-bridge-audit-file))
+
 (provide 'magnus-bridge-auth)
 
 ;;; magnus-bridge-auth.el ends here

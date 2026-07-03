@@ -162,6 +162,7 @@ destroys the history it is supposed to be reading."
     (dolist (client dead)
       (setq magnus-bridge--sse-clients
             (delq client magnus-bridge--sse-clients)))))
+
 (provide 'magnus-bridge-events)
 
 ;;; magnus-bridge-events.el ends here

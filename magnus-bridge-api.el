@@ -363,6 +363,7 @@ audited loudly and only phone-learned patterns can be removed."
                             (and (stringp identity) identity))
       (magnus-bridge--respond-json proc "400 Bad Request"
                                    '((error . "bad-pattern")))))))
+
 (provide 'magnus-bridge-api)
 
 ;;; magnus-bridge-api.el ends here
