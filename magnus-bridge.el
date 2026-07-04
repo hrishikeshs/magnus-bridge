@@ -4,7 +4,7 @@
 
 ;; Author: Hrishikesh S
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
-;; Version: 0.6.0
+;; Version: 0.7.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))
 ;; Keywords: tools, processes, convenience
 

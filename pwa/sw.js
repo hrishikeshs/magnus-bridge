@@ -4,7 +4,7 @@
 
 'use strict';
 
-const CACHE = 'magnus-bridge-v8';
+const CACHE = 'magnus-bridge-v9';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest',
                '/icons/icon-192.png', '/icons/icon-512.png'];
 

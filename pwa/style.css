@@ -106,6 +106,18 @@ header {
 }
 .dot.on { background: var(--ok); }
 
+/* ---- connection banner ---- */
+
+.banner {
+  padding: 6px 12px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--bg);
+  background: var(--warn);
+  border-bottom: 1px solid var(--border);
+}
+.banner.offline { color: var(--text); background: var(--panel); }
+
 /* ---- agent tabs ---- */
 
 #agent-tabs {
@@ -143,6 +155,8 @@ header {
   border-radius: 50%;
   background: var(--accent);
 }
+.tab.offline { opacity: 0.55; }
+.tab .offline-label { font-size: 10px; color: var(--muted); }
 
 /* ---- feed ---- */
 
@@ -174,6 +188,31 @@ header {
   align-self: flex-end;
   background: var(--sent);
   border-bottom-right-radius: 4px;
+}
+
+/* ---- outgoing message states ---- */
+
+.msg .mstate { font-size: 11px; }
+.msg.pending.failed { border: 1px solid var(--bad); }
+.msg.pending.failed .mstate { color: var(--bad); }
+.msg.pending.queued .mstate { color: var(--muted); }
+
+.retry {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sent-thumb {
+  display: block;
+  max-width: 180px;
+  border-radius: 8px;
+  margin: 4px 0;
 }
 
 .msg.mention,
@@ -223,6 +262,7 @@ header {
 /* ---- rich text: thinking pills, show-more ---- */
 
 .rich .plain { white-space: pre-wrap; }
+.rich a { color: var(--accent); text-decoration: underline; word-break: break-all; }
 
 .think-pill {
   display: block;

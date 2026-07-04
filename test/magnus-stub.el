@@ -33,6 +33,9 @@
 (defun magnus-instances-get (id)
   (cl-find id magnus-stub-instances :key #'magnus-instance-id :test #'equal))
 
+(defun magnus-instances-get-by-name (name)
+  (cl-find name magnus-stub-instances :key #'magnus-instance-name :test #'equal))
+
 (defun magnus-coord-nudge-agent (instance message &optional _source)
   (push (cons (magnus-instance-id instance) message) magnus-stub-sent))
 

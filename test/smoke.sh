@@ -55,6 +55,18 @@ check "code is single-use"      403 "$(code "${J[@]}" \
 check "status with token"       200 "$(code -b "$DIR/cookies" $MB/api/status)"
 check "send delivers"           200 "$(code -b "$DIR/cookies" "${J[@]}" \
   -d '{"agent":"stub-1","text":"smoke hello"}' $MB/api/send)"
+check "send by name"            200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"test-fox","text":"name addressing works"}' $MB/api/send)"
+check "offline contact 409"     409 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"ghost-agent","text":"anyone home?"}' $MB/api/send)"
+check "duplicate send dropped"  200 "$(code -b "$DIR/cookies" "${J[@]}" \
+  -d '{"agent":"stub-1","text":"dup test","client_id":"cid-1"}' $MB/api/send)"
+dup=$(curl -s -b "$DIR/cookies" -H "Content-Type: application/json" \
+  -d '{"agent":"stub-1","text":"dup test","client_id":"cid-1"}' $MB/api/send)
+case "$dup" in
+  *'"duplicate":true'*) pass=$((pass + 1)); echo "ok   - retry acked as duplicate" ;;
+  *) fail=$((fail + 1)); echo "FAIL - duplicate not flagged: $dup" ;;
+esac
 check "empty send rejected"     400 "$(code -b "$DIR/cookies" "${J[@]}" \
   -d '{"agent":"stub-1","text":"  "}' $MB/api/send)"
 check "approve needs flag"      400 "$(code -b "$DIR/cookies" "${J[@]}" \

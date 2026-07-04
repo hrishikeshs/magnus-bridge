@@ -23,6 +23,9 @@
 (require 'magnus-bridge-events)
 (require 'magnus-bridge-agents)
 
+(declare-function magnus-instance-id "magnus-instances" (instance))
+(declare-function magnus-instance-name "magnus-instances" (instance))
+
 (defcustom magnus-bridge-max-upload-bytes (* 20 1024 1024)
   "Maximum accepted HTTP request body size in bytes."
   :type 'integer
@@ -104,6 +107,21 @@ The connection is closed unless KEEP-OPEN is non-nil."
   "Directory where photos sent from the phone are stored for agents."
   :type 'directory
   :group 'magnus-bridge)
+
+(defvar magnus-bridge--seen-client-ids nil
+  "Recently seen client message ids, newest first, for send dedup.
+Retrying a send is always safe: a repeated id is acknowledged but
+never delivered twice.")
+
+(defun magnus-bridge--duplicate-p (client-id)
+  "Record CLIENT-ID; return non-nil if it was already seen."
+  (when (and (stringp client-id) (not (string-empty-p client-id)))
+    (if (member client-id magnus-bridge--seen-client-ids)
+        t
+      (push client-id magnus-bridge--seen-client-ids)
+      (when (> (length magnus-bridge--seen-client-ids) 200)
+        (setcdr (nthcdr 199 magnus-bridge--seen-client-ids) nil))
+      nil)))
 
 (defconst magnus-bridge--content-types
   '(("html" . "text/html; charset=utf-8")
@@ -265,13 +283,24 @@ Resumes from the Last-Event-ID in HEADERS or a `since' in QUERY."
      ((> (length text) magnus-bridge-max-message-length)
       (magnus-bridge--respond-json proc "400 Bad Request"
                                    '((error . "too-long"))))
+     ((magnus-bridge--duplicate-p (magnus-bridge--jget parsed "client_id"))
+      (magnus-bridge--audit "send-duplicate-dropped" text
+                            (and (stringp identity) identity))
+      (magnus-bridge--respond-json proc "200 OK"
+                                   '((ok . t) (duplicate . t))))
      (t
       (condition-case err
-          (let ((name (magnus-bridge--send-to-agent agent text)))
+          (let* ((instance (magnus-bridge--send-to-agent agent text))
+                 (name (magnus-instance-name instance)))
             (magnus-bridge--audit "send" (format "%s: %s" name text)
                                   (and (stringp identity) identity))
-            (magnus-bridge--emit "sent" :agent agent :name name :text text)
+            (magnus-bridge--emit "sent"
+                                 :agent (magnus-instance-id instance)
+                                 :name name :text text)
             (magnus-bridge--respond-json proc "200 OK" '((ok . t))))
+        (magnus-bridge-offline
+         (magnus-bridge--respond-json proc "409 Conflict"
+                                      '((error . "offline"))))
         (error
          (magnus-bridge--respond-json
           proc "400 Bad Request"
@@ -312,6 +341,9 @@ chooses the filename; client names are never trusted."
      ((or (null data) (< (length data) 100))
       (magnus-bridge--respond-json proc "400 Bad Request"
                                    '((error . "bad-image"))))
+     ((magnus-bridge--duplicate-p (magnus-bridge--jget parsed "client_id"))
+      (magnus-bridge--respond-json proc "200 OK"
+                                   '((ok . t) (duplicate . t))))
      (t
       (condition-case err
           (let* ((file (expand-file-name
@@ -324,14 +356,20 @@ chooses the filename; client names are never trusted."
             (let ((coding-system-for-write 'no-conversion))
               (write-region data nil file nil 0))
             (set-file-modes file #o600)
-            (let ((name (magnus-bridge--send-to-agent agent message-text)))
+            (let* ((instance (magnus-bridge--send-to-agent agent message-text))
+                   (name (magnus-instance-name instance)))
               (magnus-bridge--audit "upload"
                                     (format "%s <- %s (%d bytes)"
                                             name file (length data))
                                     (and (stringp identity) identity))
-              (magnus-bridge--emit "sent" :agent agent :name name
+              (magnus-bridge--emit "sent"
+                                   :agent (magnus-instance-id instance)
+                                   :name name
                                    :text (concat (string-trim text) " 📷 photo"))
               (magnus-bridge--respond-json proc "200 OK" '((ok . t)))))
+        (magnus-bridge-offline
+         (magnus-bridge--respond-json proc "409 Conflict"
+                                      '((error . "offline"))))
         (error
          (magnus-bridge--respond-json
           proc "400 Bad Request"

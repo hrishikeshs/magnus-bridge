@@ -18,7 +18,7 @@
 (require 'json)
 
 
-(defconst magnus-bridge-version "0.6.0")
+(defconst magnus-bridge-version "0.7.0")
 
 (defgroup magnus-bridge nil
   "Talk to your Magnus agents from your phone."

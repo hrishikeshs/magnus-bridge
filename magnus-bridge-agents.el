@@ -25,6 +25,7 @@
 (declare-function magnus-instances-active-list "magnus-instances")
 
 (declare-function magnus-instances-get "magnus-instances" (id))
+(declare-function magnus-instances-get-by-name "magnus-instances" (name))
 
 (declare-function magnus-instance-id "magnus-instances" (instance))
 
@@ -95,6 +96,19 @@ sift or the JSONL on a real screen for those."
   :type 'file
   :group 'magnus-bridge)
 
+(define-error 'magnus-bridge-offline "Agent is offline")
+
+(defun magnus-bridge--resolve (handle)
+  "Return the live instance for HANDLE — an instance uuid or a name.
+Threads are keyed by uuid (the agent's identity, per the den's
+ontology: a new uuid is a new agent even under an old name); names are
+accepted as addresses since they are unique among the living.  Signals
+`magnus-bridge-offline' when no live instance matches."
+  (or (and (stringp handle)
+           (or (magnus-instances-get handle)
+               (magnus-instances-get-by-name handle)))
+      (signal 'magnus-bridge-offline (list handle))))
+
 (defconst magnus-bridge--approve-keys '("1" "2" "3" "y" "n" "esc")
   "The only key sequences the approve endpoint will deliver.")
 
@@ -114,34 +128,59 @@ The plist has :file, :offset (bytes already relayed) and :until
   "Hash of directory -> list of md5 hashes of already-relayed mention lines.")
 
 (defun magnus-bridge--roster ()
-  "Return the agent roster as a vector of alists."
-  (vconcat
-   (mapcar
-    (lambda (instance)
-      `((id . ,(magnus-instance-id instance))
-        (name . ,(magnus-instance-name instance))
-        (directory . ,(abbreviate-file-name
-                       (or (magnus-instance-directory instance) "")))
-        (status . ,(symbol-name (magnus-instance-status instance)))
-        (health . ,(symbol-name (or (ignore-errors (magnus-health-get instance))
-                                    'unknown)))
-        (attention . ,(if (and (boundp 'magnus-attention-queue)
-                               (member (magnus-instance-id instance)
-                                       magnus-attention-queue))
-                          t :false))))
-    (magnus-instances-active-list))))
+  "Return the contact roster as a vector of alists.
+Contacts are keyed by instance uuid — the identity that survives
+archive, resurrect and Emacs restarts.  Live instances first, then
+offline contacts: uuids that appear in chat history with no living
+body, shown under their last-known name so their threads stay
+readable (and their outbox deliverable if they return)."
+  (let* ((live (magnus-instances-active-list))
+         (live-ids (mapcar #'magnus-instance-id live))
+         (offline nil))
+    (dolist (event magnus-bridge--events)
+      (let ((id (alist-get 'agent event))
+            (name (alist-get 'name event)))
+        (when (and (stringp id) (not (string-empty-p id))
+                   (stringp name) (not (string-empty-p name))
+                   (not (member id live-ids))
+                   (not (assoc id offline)))
+          (push (cons id name) offline))))
+    (vconcat
+     (append
+      (mapcar
+       (lambda (instance)
+         `((id . ,(magnus-instance-id instance))
+           (name . ,(magnus-instance-name instance))
+           (directory . ,(abbreviate-file-name
+                          (or (magnus-instance-directory instance) "")))
+           (status . ,(symbol-name (magnus-instance-status instance)))
+           (health . ,(symbol-name (or (ignore-errors (magnus-health-get instance))
+                                       'unknown)))
+           (attention . ,(if (and (boundp 'magnus-attention-queue)
+                                  (member (magnus-instance-id instance)
+                                          magnus-attention-queue))
+                             t :false))))
+       live)
+      (mapcar (lambda (entry)
+                `((id . ,(car entry))
+                  (name . ,(cdr entry))
+                  (directory . "")
+                  (status . "offline")
+                  (health . "offline")
+                  (attention . :false)))
+              (nreverse offline))))))
 
-(defun magnus-bridge--send-to-agent (id text)
-  "Deliver TEXT to the agent with instance ID.
-Returns the instance name, or signals an error."
-  (let ((instance (magnus-instances-get id)))
-    (unless instance (error "No such agent"))
+(defun magnus-bridge--send-to-agent (handle text)
+  "Deliver TEXT to the live agent addressed by HANDLE (uuid or name).
+Returns the instance.  Signals `magnus-bridge-offline' when nobody
+living answers to HANDLE."
+  (let ((instance (magnus-bridge--resolve handle)))
     (magnus-coord-nudge-agent
      instance
      (string-trim (replace-regexp-in-string "[\n\r]+" " " text))
      (format "%s (phone)" magnus-bridge-user-mention))
     (magnus-bridge--watch-replies instance)
-    (magnus-instance-name instance)))
+    instance))
 
 (defun magnus-bridge--prompt-tail (instance)
   "Return the trailing prompt text of INSTANCE's buffer, or nil."
@@ -150,15 +189,15 @@ Returns the instance name, or signals an error."
       (with-current-buffer buffer
         (ignore-errors (magnus-attention--tail-text))))))
 
-(defun magnus-bridge--approve (id key)
-  "Send whitelisted KEY to the attention-flagged instance ID."
+(defun magnus-bridge--approve (handle key)
+  "Send whitelisted KEY to the attention-flagged agent HANDLE (uuid or name)."
   (unless (member key magnus-bridge--approve-keys)
     (error "Key not allowed"))
-  (unless (and (boundp 'magnus-attention-queue)
-               (member id magnus-attention-queue))
-    (error "Agent is not waiting for input"))
-  (let* ((instance (magnus-instances-get id))
-         (buffer (and instance (magnus-instance-buffer instance))))
+  (let* ((instance (magnus-bridge--resolve handle))
+         (buffer (magnus-instance-buffer instance)))
+    (unless (and (boundp 'magnus-attention-queue)
+                 (member (magnus-instance-id instance) magnus-attention-queue))
+      (error "Agent is not waiting for input"))
     (unless (and buffer (buffer-live-p buffer))
       (error "Agent buffer is gone"))
     (with-current-buffer buffer
@@ -224,7 +263,7 @@ Returns the instance name, or signals an error."
                (advanced (> (plist-get watch :offset) before)))
           (dolist (text texts)
             (magnus-bridge--emit "reply"
-                                 :agent id
+                                 :agent (magnus-instance-id instance)
                                  :name (magnus-instance-name instance)
                                  :text text))
           ;; Session file grew but produced no visible text: the agent
@@ -232,7 +271,7 @@ Returns the instance name, or signals an error."
           (when (and advanced (null texts))
             (magnus-bridge--broadcast-transient
              "typing"
-             :agent id
+             :agent (magnus-instance-id instance)
              :name (magnus-instance-name instance))))))))
 
 (defun magnus-bridge--read-new-texts (watch)

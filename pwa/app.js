@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 const HEALTH_GLYPHS = { ok: '●', stale: '◐', stuck: '·', dead: '✕' };
 const HEALTH_LABELS = { stuck: 'idle', stale: 'quiet' };
+const STATE_GLYPH = { sending: '🕐', sent: '✓', failed: '⚠️', queued: '📮' };
 
 const state = {
   agents: [],            // roster from /api/status
@@ -17,7 +18,17 @@ const state = {
   lastSeen: JSON.parse(localStorage.getItem('lastSeen') || '{}'),
   source: null,          // EventSource
   typing: new Map(),     // agent id -> expiry ms; fed by transient events
+  connected: false,      // SSE open / last request reached the bridge
+  pending: [],           // local echoes + outbox (see loadPending)
 };
+
+/* Outbox: unsent/undelivered messages, persisted so they survive an app
+   restart. A restored "sending" message is unconfirmed, so it reverts to
+   "queued" until a flush retries it. */
+loadPending();
+
+let reconnectDelay = 1000;   // capped exponential backoff for SSE
+let reconnectTimer = null;
 
 setInterval(() => {                 // expire stale typing bubbles
   const now = Date.now();
@@ -39,13 +50,16 @@ async function init() {
   if (res.status === 401) return showPairing();
   const data = await res.json();
   state.agents = data.agents || [];
+  setConnected(true);
   showApp();
   await loadHistory();
   connectEvents();
   setInterval(refreshStatus, 30000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { refreshStatus(); connectEvents(); }
+    if (!document.hidden) { refreshStatus(); connectEvents(); flushOutbox(); }
   });
+  window.addEventListener('online', () => { connectEvents(); flushOutbox(); });
+  window.addEventListener('offline', () => setConnected(false));
 }
 
 /* Server unreachable (laptop asleep, Emacs restarting): show the last
@@ -105,7 +119,13 @@ async function refreshStatus() {
   const res = await fetch('/api/status').catch(() => null);
   if (!res || !res.ok) return setConnected(false);
   const data = await res.json();
+  const wasOffline = new Map(state.agents.map((a) => [a.id, a.status === 'offline']));
   state.agents = data.agents || [];
+  setConnected(true);
+  // A contact that just came back to life can receive its queued messages.
+  const revived = state.agents.some(
+    (a) => a.status !== 'offline' && wasOffline.get(a.id));
+  if (revived) flushOutbox();
   renderTabs();
 }
 
@@ -120,10 +140,22 @@ async function loadHistory() {
 
 function connectEvents() {
   if (state.source && state.source.readyState !== EventSource.CLOSED) return;
+  clearTimeout(reconnectTimer);
   const source = new EventSource('/api/events?since=' + state.lastEventId);
   state.source = source;
-  source.onopen = () => setConnected(true);
-  source.onerror = () => setConnected(false); // EventSource auto-reconnects
+  source.onopen = () => {
+    reconnectDelay = 1000;   // healthy link — reset the backoff
+    setConnected(true);
+    refreshStatus();         // roster may have changed while we were away
+    flushOutbox();           // drain anything queued during the outage
+  };
+  // Drive reconnection ourselves (capped backoff) rather than leaning on the
+  // browser's opaque retry, so we can refresh status and flush on each try.
+  source.onerror = () => {
+    setConnected(false);
+    source.close();
+    scheduleReconnect();
+  };
   source.onmessage = (msg) => {
     const event = JSON.parse(msg.data);
     if (event.type === 'typing') {          // transient: never stored
@@ -131,12 +163,19 @@ function connectEvents() {
       renderFeed();
       return;
     }
+    if (event.type === 'sent') dropPendingEcho(event.agent, event.text);
     ingest(event);
     cacheEvents();
     renderFeed();
     renderTabs();
     maybeNotify(event);
   };
+}
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectEvents, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 15000);
 }
 
 function ingest(event) {
@@ -154,7 +193,24 @@ function ingest(event) {
 }
 
 function setConnected(on) {
+  state.connected = !!on;
   $('conn-dot').classList.toggle('on', !!on);
+  updateBanner();
+}
+
+/* Slim status banner under the header. Hidden when the bridge is reachable;
+   distinguishes "phone has no network" from "phone online, Mac asleep". */
+function updateBanner() {
+  const banner = $('conn-banner');
+  if (state.connected) {
+    banner.className = 'banner hidden';
+  } else if (!navigator.onLine) {
+    banner.textContent = '📴 You’re offline';
+    banner.className = 'banner offline';
+  } else {
+    banner.textContent = '⚠️ Mac unreachable — retrying…';
+    banner.className = 'banner';
+  }
 }
 
 function markSeen(agentId) {
@@ -173,17 +229,23 @@ function hasUnread(agentId) {
 function renderTabs() {
   const tabs = $('agent-tabs');
   tabs.innerHTML = '';
-  tabs.appendChild(makeTab('all', 'All', null));
+  tabs.appendChild(makeTab('all', 'All', null, null));
+  // Server orders live agents first, offline contacts last — preserve it.
   for (const agent of state.agents) {
-    tabs.appendChild(makeTab(agent.id, agent.name, agent.health));
+    tabs.appendChild(makeTab(agent.id, agent.name, agent.health, agent.status));
   }
 }
 
-function makeTab(id, label, health) {
+function makeTab(id, label, health, status) {
   const el = document.createElement('button');
-  el.className = 'tab' + (state.selected === id ? ' active' : '');
+  const offline = status === 'offline';
+  el.className = 'tab' + (state.selected === id ? ' active' : '') +
+    (offline ? ' offline' : '');
   el.textContent = label;
-  if (health) {
+  if (offline) {
+    // Contact with chat history but no live agent: readable, sends queue.
+    el.appendChild(chip('offline-label', 'offline'));
+  } else if (health) {
     const dot = document.createElement('span');
     dot.className = 'h ' + health;
     dot.textContent = HEALTH_GLYPHS[health] || '·';
@@ -219,6 +281,11 @@ function visibleEvents() {
   return state.events.filter((e) => e.agent === state.selected);
 }
 
+function visiblePending() {
+  if (state.selected === 'all') return state.pending;
+  return state.pending.filter((m) => m.agent === state.selected);
+}
+
 function renderFeed() {
   const feed = $('feed');
   const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
@@ -235,6 +302,7 @@ function renderFeed() {
     }
     feed.appendChild(renderEvent(event));
   }
+  for (const msg of visiblePending()) feed.appendChild(renderPending(msg));
   const now = Date.now();
   for (const [id, until] of state.typing) {
     if (until < now) continue;
@@ -293,6 +361,37 @@ function renderEvent(event) {
   return el;
 }
 
+/* Local echo for an outgoing message. Its delivery state (sending / sent /
+   failed / queued) shows as a glyph in the who-line; failed messages get a
+   retry button that re-sends with the same client_id (safe — the server
+   dedups). Replaced by the server's own "sent" event when it arrives. */
+function renderPending(msg) {
+  const el = document.createElement('div');
+  el.className = 'msg sent pending ' + msg.mstate;
+  const w = who('you → ' + msg.name, msg.ts);
+  const badge = document.createElement('span');
+  badge.className = 'mstate';
+  badge.textContent = ' ' + (STATE_GLYPH[msg.mstate] || '');
+  w.appendChild(badge);
+  el.appendChild(w);
+  if (msg.image) {
+    const thumb = document.createElement('img');
+    thumb.className = 'sent-thumb';
+    thumb.src = 'data:image/jpeg;base64,' + msg.image;
+    thumb.alt = '';
+    el.appendChild(thumb);
+  }
+  el.appendChild(richText(msg.text));
+  if (msg.mstate === 'failed') {
+    const retry = document.createElement('button');
+    retry.className = 'retry';
+    retry.textContent = 'retry';
+    retry.onclick = () => deliver(msg);
+    el.appendChild(retry);
+  }
+  return el;
+}
+
 function typingBubble(name) {
   const el = document.createElement('div');
   el.className = 'msg typing';
@@ -343,16 +442,48 @@ function appendPlain(container, chunk) {
   const el = document.createElement('span');
   el.className = 'plain';
   if (chunk.length > 1200) {
-    el.textContent = chunk.slice(0, 1000) + '…';
+    appendLinkified(el, chunk.slice(0, 1000) + '…');
     const more = document.createElement('button');
     more.className = 'show-more';
     more.textContent = 'show more';
-    more.onclick = () => { el.textContent = chunk; more.remove(); };
+    more.onclick = () => {
+      el.textContent = '';
+      appendLinkified(el, chunk);
+      more.remove();
+    };
     container.appendChild(el);
     container.appendChild(more);
   } else {
-    el.textContent = chunk;
+    appendLinkified(el, chunk);
     container.appendChild(el);
+  }
+}
+
+/* Append TEXT to PARENT, turning http(s) URLs into tappable links. Builds
+   text and anchor nodes directly — never innerHTML — so message content
+   cannot inject markup. Trailing sentence punctuation stays out of the href. */
+function appendLinkified(parent, text) {
+  const re = /https?:\/\/[^\s]+/g;
+  let cursor = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    let url = m[0];
+    const trail = url.match(/[.,!?;:'")\]}>]+$/);
+    if (trail) url = url.slice(0, -trail[0].length);
+    if (!url) continue;
+    if (m.index > cursor) {
+      parent.appendChild(document.createTextNode(text.slice(cursor, m.index)));
+    }
+    const a = document.createElement('a');
+    a.href = url;                 // regex guarantees an http(s) scheme
+    a.textContent = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    parent.appendChild(a);
+    cursor = m.index + url.length;
+  }
+  if (cursor < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(cursor)));
   }
 }
 
@@ -595,7 +726,7 @@ function downscale(file) {
   });
 }
 
-async function sendMessage() {
+function sendMessage() {
   const body = input.value.trim();
   const image = pendingImage;
   if ((!body && !image) || state.selected === 'all') return;
@@ -604,27 +735,117 @@ async function sendMessage() {
   clearAttachment();
   autogrow();
   requestNotifyPermission();
-  const res = image
-    ? await api('/api/upload', { agent: state.selected, text: body, image })
-    : await api('/api/send', { agent: state.selected, text: body });
-  if (!res || !res.ok) {
-    input.value = body;   // give the message back rather than losing it
-    localStorage.setItem(draftKey(), body);
-    autogrow();
-    setConnected(false);
+  const msg = {
+    clientId: crypto.randomUUID(),
+    agent: state.selected,               // always the uuid
+    name: agentName(state.selected) || '?',
+    text: body,
+    image: image || null,
+    ts: new Date().toISOString(),
+    mstate: 'sending',
+    inflight: false,
+  };
+  state.pending.push(msg);
+  savePending();
+  renderFeed();
+  if (!state.connected) {                // banner is up — don't wait on a dead link
+    msg.mstate = 'queued';
+    savePending();
+    renderFeed();
+    return;
   }
+  deliver(msg);
 }
 
 $('send-btn').addEventListener('click', sendMessage);
 
 /* ---------- actions ---------- */
 
+/* Every POST is bounded by a 10s timeout: a hung request aborts and returns
+   null (a failed send, retryable). Returns the Response otherwise so callers
+   can read res.ok / res.status. */
 async function api(path, payload) {
-  return fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  }).catch(() => null);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    return await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    return null;   // network error or timeout
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* Send (or re-send) one pending message. Idempotent by client_id, so a
+   retry that the server already saw comes back 200 duplicate — still ok. */
+async function deliver(msg) {
+  if (msg.inflight) return;
+  if (!navigator.onLine) {
+    msg.mstate = 'queued'; savePending(); renderFeed(); return;
+  }
+  msg.inflight = true;
+  msg.mstate = 'sending';
+  savePending();
+  renderFeed();
+  const payload = { agent: msg.agent, text: msg.text, client_id: msg.clientId };
+  if (msg.image) payload.image = msg.image;
+  const res = await api(msg.image ? '/api/upload' : '/api/send', payload);
+  msg.inflight = false;
+  if (res && res.ok) {
+    msg.mstate = 'sent';            // 2xx (incl. duplicate) — server has it
+    setConnected(true);
+  } else if (res && res.status === 409) {
+    msg.mstate = 'queued';          // contact has no live agent right now
+  } else {
+    msg.mstate = 'failed';          // timeout / network / 5xx / 400
+    if (!res) setConnected(false);
+  }
+  savePending();
+  renderFeed();
+}
+
+/* Retry every undelivered outbox message. Called on reconnect, on returning
+   to the foreground, and when an offline contact comes back to life. */
+function flushOutbox() {
+  if (!navigator.onLine) return;
+  for (const msg of state.pending) {
+    if (msg.inflight) continue;
+    if (msg.mstate !== 'sent') deliver(msg);
+  }
+}
+
+/* The server broadcasts its own "sent" event for each accepted message;
+   drop the matching local echo so the thread shows one bubble, not two.
+   Uploads arrive with a " 📷 photo" suffix the echo doesn't have. */
+function dropPendingEcho(agent, text) {
+  const bare = (text || '').replace(/\s*📷 photo$/, '').trim();
+  const i = state.pending.findIndex((m) =>
+    m.agent === agent && (m.text === (text || '') || m.text.trim() === bare));
+  if (i !== -1) { state.pending.splice(i, 1); savePending(); }
+}
+
+function savePending() {
+  try {
+    localStorage.setItem('outbox', JSON.stringify(
+      state.pending.filter((m) => m.mstate !== 'sent').map((m) => ({
+        clientId: m.clientId, agent: m.agent, name: m.name, text: m.text,
+        image: m.image || null, ts: m.ts, mstate: m.mstate,
+      }))));
+  } catch (e) { /* storage full — best-effort, like the event cache */ }
+}
+
+function loadPending() {
+  const saved = JSON.parse(localStorage.getItem('outbox') || '[]');
+  state.pending = saved.map((m) => ({
+    ...m,
+    inflight: false,
+    mstate: m.mstate === 'sending' ? 'queued' : m.mstate,
+  }));
 }
 
 async function approve(agent, key) {
