@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026 Hrishikesh S
 
 ;; Author: Hrishikesh S
+;; Assisted-by: Claude Code:claude-fable-5
 ;; URL: https://github.com/hrishikeshs/magnus-bridge
 ;; Version: 0.7.0
 ;; Package-Requires: ((emacs "28.1") (magnus "0.5"))

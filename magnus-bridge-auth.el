@@ -2,6 +2,7 @@
 
 ;; Copyright (C) 2026 Hrishikesh S
 ;; Author: Hrishikesh S
+;; Assisted-by: Claude Code:claude-fable-5
 ;; SPDX-License-Identifier: MIT
 
 ;; This file is not part of GNU Emacs.
