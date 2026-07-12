@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bridge-integration.sh — end-to-end proof that magnus-bridge-client.el is a
+# bridge-integration.sh — end-to-end proof that magnus-bridge.el is a
 # real remote-transport client of the bridge daemon.
 #
 # It builds a SCRATCH daemon from the sibling bridge repo into a temp dir,
@@ -10,23 +10,22 @@
 #   (i)   the agent shows up live on the remote transport, flavor "emacs";
 #   (ii)  a phone send lands in the agent's buffer exactly once (delivered +
 #         acked — no redelivery), typed by the client's real drain/ack loop;
-#   (iii) an attested dialog-frame tail flips the contact's prompt_open — IF the
-#         daemon has the phase-3 raise; otherwise this is a clean SKIP.
+#   (iii) an attested dialog-frame tail flips the contact's prompt_open.
 #
-# Exits 0 with "skipped: <reason>" unless go, tmux, emacs, curl, python3 and the
-# bridge repo are all present.  Bounded well under 90s; a trap kills everything.
+# Requires go, tmux, emacs, curl, python3 and a sibling bridge checkout.
+# Bounded well under 90s; a trap kills everything.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BRIDGE_REPO="${BRIDGE_REPO:-$(cd "$ROOT/.." 2>/dev/null && pwd)/bridge}"
 
-# --- preflight: skip (exit 0) unless everything is available ----------------
-skip() { echo "skipped: $1"; exit 0; }
+# --- preflight -------------------------------------------------------------
+fail() { echo "FAIL: $1"; exit 1; }
 for t in go tmux emacs curl python3; do
-  command -v "$t" >/dev/null 2>&1 || skip "$t not available"
+  command -v "$t" >/dev/null 2>&1 || fail "$t not available"
 done
-[ -d "$BRIDGE_REPO" ] || skip "bridge repo not found at $BRIDGE_REPO"
-[ -f "$BRIDGE_REPO/go.mod" ] || skip "bridge repo has no go.mod (not the Go daemon)"
+[ -d "$BRIDGE_REPO" ] || fail "bridge repo not found at $BRIDGE_REPO"
+[ -f "$BRIDGE_REPO/go.mod" ] || fail "bridge repo has no go.mod (not the Go daemon)"
 
 # --- isolate everything under one temp dir ---------------------------------
 TMP="$(mktemp -d)"
@@ -67,7 +66,7 @@ bad()  { fail=$((fail+1)); echo "FAIL - $1"; }
 
 # --- port guard -------------------------------------------------------------
 if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
-  skip "random port $PORT already in use"
+  fail "random port $PORT already in use"
 fi
 
 # --- build the scratch daemon (read-only from the bridge repo) --------------
@@ -98,29 +97,30 @@ cat > "$CLIENT_EL" <<'ELISP'
 ;; A minimal live host: one fake agent in a scratch buffer with a real (sleep)
 ;; process so the readiness check passes, a type-stub that records deliveries,
 ;; and a bounded pump loop that also injects a dialog frame on request.
-(require 'magnus-bridge-client)
+(require 'magnus-bridge)
 (let* ((buf (get-buffer-create "wolf-sim"))
        (typed (getenv "RT_TYPED"))
        (inject (getenv "RT_INJECT"))
        (stop (getenv "RT_STOP"))
        (proc (start-process "wolf-proc" buf "sleep" "120")))
   (set-process-query-on-exit-flag proc nil)
-  (setq magnus-bridge-client-daemon-file (getenv "RT_DAEMON")
-        magnus-bridge-client-roster-function
+  (setq magnus-bridge-daemon-file (getenv "RT_DAEMON")
+        magnus-bridge-roster-function
         (lambda ()
           (list (list :instance-id "wolf-1"
                       :name "wolf-sim"
                       :directory (getenv "RT_DIR")
                       :session-id (getenv "RT_SESSION")
+                      :provider 'claude
                       :buffer buf)))
-        magnus-bridge-client-type-function
+        magnus-bridge-type-function
         (lambda (buffer string kind)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
               (goto-char (point-max))
               (insert (format "[%s] %s\n" kind string))))
           (write-region (format "%s\t%s\n" kind string) nil typed 'append 0)))
-  (magnus-bridge-client-connect)
+  (magnus-bridge-mode 1)
   (let ((deadline (+ (float-time) 80)) (injected nil))
     (while (and (< (float-time) deadline) (not (file-exists-p stop)))
       (accept-process-output nil 0.2)
@@ -136,7 +136,7 @@ ELISP
 
 RT_DIR="$TMP" RT_SESSION="$SESSION" RT_DAEMON="$HOME_DIR/.bridge/daemon.json" \
 RT_TYPED="$TYPED" RT_INJECT="$INJECT" RT_STOP="$STOP" \
-  emacs --batch -Q -L "$ROOT" -l "$ROOT/magnus-bridge-client.el" -l "$CLIENT_EL" \
+  emacs --batch -Q -L "$ROOT" -l "$ROOT/magnus-bridge.el" -l "$CLIENT_EL" \
   >"$EMACS_LOG" 2>&1 &
 EMACS_PID=$!
 
@@ -209,7 +209,7 @@ done
 if [ "$flipped" = y ]; then
   ok "attested dialog tail flipped prompt_open (phase-3 raise present)"
 else
-  echo "prompt-card: SKIPPED (daemon predates phase-3 raise)"
+  bad "attested dialog tail did not raise a prompt card"
   echo "--- diag: contacts ---"; contacts
   echo "--- diag: emacs.log tail ---"; tail -25 "$EMACS_LOG"
   echo "--- diag: server.log tail ---"; tail -25 "$LOG"

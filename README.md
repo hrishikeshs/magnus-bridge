@@ -1,151 +1,104 @@
 # magnus-bridge
 
-**Chat with your [Magnus](https://github.com/hrishikeshs/magnus) agents from your phone.**
+Host [Magnus](https://github.com/hrishikeshs/magnus) agents in the
+[Bridge](https://github.com/hrishikeshs/bridge) messenger.
 
-magnus-bridge runs a small HTTP server *inside Emacs* serving a chat PWA.
-Exposed over [Tailscale](https://tailscale.com), it gives you a real
-messaging interface to your Claude Code crew from anywhere — with **no
-third party between your thumb and your agents**. Not this repo's
-author, not a bot platform, not a push service. Your editor, your
-tailnet, your crew.
+`magnus-bridge` is deliberately small. Magnus owns agent processes and Bridge
+owns the phone app, identity, history, delivery, permissions, and security.
+This package is the adapter between them:
 
-## Screenshots
-
-**Chatting with an agent — replies stream back, thinking stays folded:**
-
-<p align="center">
-  <img src="screenshots/chat.png" width="380" alt="Chat with an agent">
-</p>
-
-**Tap to read the agent's reasoning; auto-approvals surface in the feed; typing dots are real agent activity:**
-
-<p align="center">
-  <img src="screenshots/thinking.png" width="380" alt="Expanded thinking, auto-approve events, typing indicator">
-</p>
-
-**Permission prompts become tappable cards — labeled buttons parsed from the real prompt, or teach a pattern with "Always allow this":**
-
-<p align="center">
-  <img src="screenshots/attention.png" width="380" alt="Attention card and approval">
-</p>
-
-> "Ten years ago this sentence was science fiction; today it's a Tuesday
-> in the den." — quick-wolf, an agent, upon receiving a text from a
-> sidewalk
-
-## What it feels like
-
-- 💬 **Chat** — message any agent; it lands in their terminal as
-  `[From You (phone)]: …` and their reply streams back into the thread.
-  Only the agent's *visible* output is relayed — thinking traces and
-  tool internals never leave your machine.
-- ⌛ **Typing indicators** — three dots while the agent is actually
-  thinking or running tools, derived from real activity, not theater.
-- 📷 **Photos** — send screenshots; they're saved locally and the agent
-  is pointed at the path. Claude Code agents can *Read* images, so they
-  genuinely look at what you sent.
-- 🔔 **Attention cards** — when an agent hits a permission prompt, your
-  phone shows the prompt with tappable, labeled buttons.
-- ✓ **Taught auto-approve** — "Always allow this" on any attention card
-  teaches Magnus a pattern (editable before you confirm, revocable from
-  ⚙, loudly audited). Future auto-approvals surface in the feed so
-  standing permissions never go invisible.
-- 💭 **Thinking pills** — agents that reason out loud get their
-  `[thinking]` blocks collapsed into tappable pills. Small screens,
-  respected.
-- 📜 **Durable history** — survives page refreshes and Emacs restarts.
-- 📊 **Live roster** — every agent with health at a glance.
-
-## Install
-
-```
-M-x package-install RET magnus-bridge
+```text
+phone ⇄ bridge daemon ⇄ magnus-bridge ⇄ Magnus vterms
 ```
 
-You also need [Tailscale](https://tailscale.com/download) on your
-computer and phone (free for personal use).
+The daemon never reaches into Emacs. Emacs registers its live agents, attests
+their readiness, drains daemon-authored messages into their terminals, and
+acknowledges only deliveries it actually typed.
 
-## Setup (once)
+## Requirements
 
+- Emacs 28.1 or newer
+- Magnus 0.5 or newer
+- The `bridge` daemon running on the same machine
+
+Install and start Bridge first:
+
+```sh
+go install github.com/hrishikeshs/bridge@latest
+bridge install-daemon
+bridge expose
+bridge pair
 ```
-M-x magnus-bridge-start            ;; server on 127.0.0.1:8377
-M-x magnus-bridge-setup-tailscale  ;; tailnet-only HTTPS via `tailscale serve`
-M-x magnus-bridge-pair             ;; one-time pairing code
+
+`bridge expose` and `bridge pair` are needed only for phone access. Bridge may
+also remain local to `127.0.0.1`.
+
+## Use
+
+Enable the global adapter:
+
+```text
+M-x magnus-bridge-mode
 ```
 
-Open the printed `https://…ts.net` URL on your phone, enter the pairing
-code, then **Share → Add to Home Screen**. Done — your crew is in your
-pocket.
-
-Start with Emacs:
+Or from Emacs Lisp:
 
 ```elisp
-(with-eval-after-load 'magnus (magnus-bridge-start))
+(require 'magnus-bridge)
+(magnus-bridge-mode 1)
 ```
 
-Recommended hardening (pin the bridge to your own tailnet identity):
+Run `M-x magnus-bridge-status` to see the lease age, hosted-agent count, and
+number of deliveries typed during this connection. Disable
+`magnus-bridge-mode` to disconnect Emacs; the shared Bridge daemon and any
+agents it hosts elsewhere keep running.
 
-```elisp
-(setq magnus-bridge-allowed-logins '("you@example.com"))
+Pairing, tailnet exposure, daemon supervision, and emergency lockdown remain
+Bridge responsibilities:
+
+```sh
+bridge pair
+bridge expose
+bridge install-daemon
+bridge lockdown
 ```
 
-## Security model
+## Safety properties
 
-Messages from this bridge become *prompts* to Claude Code agents on your
-machine, so it is built with defense in depth:
+- The daemon lockfile token authenticates every localhost request.
+- A generation guard makes callbacks from expired leases harmless.
+- Messages are acknowledged only after successful terminal delivery.
+- Delivery IDs are deduplicated between typing and acknowledgement.
+- Text is never typed while Magnus reports an open permission dialog.
+- Approval keys are checked against a small whitelist on both sides.
+- Daemon restarts heal through lockfile re-reading and bounded backoff.
+- Every string crossing `url.el` is explicitly UTF-8 unibyte.
 
-1. The server binds **127.0.0.1 only** — reachable solely through
-   `tailscale serve`, which stays tailnet-only (never Funnel). WireGuard
-   device identity is the perimeter.
-2. Requests must carry the **Tailscale identity header**; restrict to
-   yourself with `magnus-bridge-allowed-logins`.
-3. The API requires a **per-device token**, obtained via a one-time
-   pairing code that is only ever displayed inside Emacs (2-minute
-   expiry, single use). Tokens persist in a `0600` file.
-4. The approve endpoint delivers **only whitelisted keys** (`1 2 3 y n
-   esc`), and only to agents Magnus attention flagged as waiting.
-5. Auto-approve patterns are **taught, not configured**: learned from a
-   specific prompt with your confirmation, revocable from the phone,
-   audited, and announced both in the feed and in Emacs.
-6. Everything a phone message triggers still passes through **Claude
-   Code's own permission system** — the bridge extends the
-   human-in-the-loop, it never removes it.
-7. Every request is **audit-logged** (`M-x magnus-bridge-audit`), and
-   request bodies are size-capped.
-8. `M-x magnus-bridge-lockdown` kills the server and revokes every
-   device token in one command.
+These complement Bridge's durable mailboxes, prompt judge, identity model,
+audit log, paired-device tokens, and tailnet boundary.
 
-What the bridge deliberately does *not* relay: agents' thinking traces
-and tool internals. Your phone gets the conversation; deep debugging
-belongs on a real screen.
+## Provider boundary
 
-## For transport hackers
+The current adapter hosts Claude Code agents over Bridge's terminal transport
+v1. Magnus-owned Codex sessions are intentionally skipped: their rollout and
+approval semantics are not Claude's, and a second semantic client would
+duplicate ownership of the native Codex TUI.
 
-The PWA is just the first client. The REST + SSE API (`/api/status`,
-`/api/send`, `/api/upload`, `/api/approve`, `/api/patterns`,
-`/api/events`, `/api/history`) accepts `Authorization: Bearer <token>`,
-so a Telegram, Signal, or Matrix adapter is ~100 lines against the same
-surface — if you're comfortable with the intermediary those imply.
-
-## Commands
-
-| Command | |
-|---|---|
-| `magnus-bridge-start` / `-stop` | start/stop the server |
-| `magnus-bridge-setup-tailscale` | expose on your tailnet, print URL |
-| `magnus-bridge-pair` | one-time device pairing code |
-| `magnus-bridge-revoke-all-devices` | de-pair everything |
-| `magnus-bridge-lockdown` | emergency stop + revoke |
-| `magnus-bridge-audit` | open the audit log |
+Use `bridge codex` for Bridge-owned semantic Codex sessions.
 
 ## Development
 
 ```sh
-make test      # 27-check smoke suite against a stubbed magnus
-make compile   # byte-compile (never with the stub loaded!)
+make test         # focused ERT suite, no daemon or vterm required
+make compile      # byte-compile with warnings as errors
 make checkdoc
+make integration  # scratch Bridge daemon + simulated Magnus agent
 ```
+
+The integration test builds the sibling `../bridge` checkout into a temporary
+directory, uses a throwaway home and random local port, and cleans up every
+process it starts.
 
 ## License
 
-MIT, like Magnus.
+MIT.

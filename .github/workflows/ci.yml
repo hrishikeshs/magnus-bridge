@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  emacs:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        emacs-version: ['28.1', '29.1']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      - name: Verify
+        run: make verify
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: magnus-bridge
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hrishikeshs/bridge
+          path: bridge
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '29.1'
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Integration
+        working-directory: magnus-bridge
+        env:
+          BRIDGE_REPO: ${{ github.workspace }}/bridge
+        run: make integration
